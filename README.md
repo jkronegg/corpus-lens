@@ -1,4 +1,4 @@
-# histoire_suisse
+# Corpus-lens
 
 ## Objectif du projet
 
@@ -20,6 +20,7 @@ Le projet intègre des workflows pour télécharger et préparer des sources de 
 - **documents officiels** (p. ex. documents liés aux votations fédérales, Swissvotes, Confédération) ;
 - **sources encyclopédiques et diplomatiques** (DHS, Dodis, ElitesSuisses) ;
 - **données quantitatives** (p. ex. évolution de la population, résultats de votations).
+![functional_architecture.png](doc/functional_architecture.png)
 
 ### 2) Extraction et normalisation documentaire
 
@@ -76,4 +77,4 @@ Autrement dit, l'outil assiste la recherche (repérage, synthèse initiale, navi
 - framework IA agentique (p.ex. GitHub Copilot, OpenAI Codex, Claude Code)
 - Python 3.8 ou supérieur
 - Bibliothèques Python : `pandas`, `numpy`, `requests`, `beautifulsoup4`, `markdown`, `sqlite3`
-- Accès aux sources de données historiques suisses (DHS, Dodis, ElitesSuisses, Swissvotes, e-newspaper)
+- Accès internet (LLM, sources de données)
