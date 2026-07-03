@@ -1,0 +1,5 @@
+pandas>=2.2.0
+PyMuPDF>=1.24.0
+rapidfuzz>=3.9.0
+rapidocr-onnxruntime>=1.3.24
+spylls>=0.1.7

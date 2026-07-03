@@ -74,7 +74,42 @@ Autrement dit, l'outil assiste la recherche (repérage, synthèse initiale, navi
 
 ## Requiert
 
-- framework IA agentique (p.ex. GitHub Copilot, OpenAI Codex, Claude Code)
-- Python 3.8 ou supérieur
-- Bibliothèques Python : `pandas`, `numpy`, `requests`, `beautifulsoup4`, `markdown`, `sqlite3`
-- Accès internet (LLM, sources de données)
+- Framework IA agentique (p.ex. GitHub Copilot, OpenAI Codex, Claude Code)
+- Python **3.14 ou superieur**
+- Acces internet (LLM, sources de donnees, telechargement des dependances)
+
+## Configuration Python (CLI)
+
+Le projet fournit un script unique `setup.ps1` pour creer le venv et installer:
+
+- la version Python cible du projet (`.python-version` = `3.14`)
+- les dependances obligatoires (`requirements-required.txt`)
+- les dependances optionnelles (`requirements-optional.txt`)
+- Chromium pour Playwright
+- les modeles spaCy (`fr_core_news_lg`, `de_core_news_lg`)
+- la base SQLite `sources\named_entities.sqlite` (initialisation)
+
+### Installation standard
+
+```powershell
+.\setup.ps1
+```
+
+### Avec un executable Python explicite
+
+```powershell
+.\setup.ps1 -PythonExe "C:\Path\To\Python314\python.exe"
+```
+
+### Activation du venv
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+### Options utiles
+
+- `-SkipOptional` : saute les librairies optionnelles.
+- `-SkipPlaywrightBrowsers` : saute `playwright install chromium`.
+- `-SkipSpacyModels` : saute le telechargement des modeles spaCy.
+- `-SkipDbInit` : saute l'initialisation de la base SQLite.
