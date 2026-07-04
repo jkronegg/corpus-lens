@@ -1861,6 +1861,11 @@ def main() -> None:
             return
         print(f"[INFO] {lock_message}")
 
+        # Nouveau dépôt sans sources: comportement normal, on sort sans erreur.
+        if not SOURCES_DIR.exists():
+            print(f"[INFO] aucun répertoire sources détecté ({SOURCES_DIR}); rien à indexer.")
+            return
+
         if not run_pdf_extraction_batch():
             return
 
