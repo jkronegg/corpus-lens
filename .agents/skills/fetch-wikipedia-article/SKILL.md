@@ -27,15 +27,14 @@ search_hints:
 
 Ce skill télécharge le contenu d'un article Wikipedia et l'enregistre en Markdown dans `sources/wikipedia/`.
 
-## Inputs
+## Inputs du script
 
 - `--title` (obligatoire): titre de l'article Wikipedia.
 - `--lang`: code langue Wikipedia (défaut: `fr`).
-- `--out-dir`: dossier de sortie Markdown (défaut: `sources/wikipedia`).
-- `--dry-run`: vérifie la résolution de l'article sans écrire de fichier.
 
-## Outputs
+## Outputs du script
 
+Le script affiche en retour un objet JSON:
 - Si l'article est trouvé: un fichier Markdown avec front matter YAML dans `sources/wikipedia/`.
 - Si l'article n'est pas trouvé: message JSON explicite `found: false`, aucun fichier créé.
 
@@ -45,13 +44,13 @@ Ce skill télécharge le contenu d'un article Wikipedia et l'enregistre en Markd
 python -u ".agents/skills/fetch-wikipedia-article/scripts/fetch_wikipedia_article.py" --title "Affaire des colonels"
 ```
 
-```powershell
-python -u ".agents/skills/fetch-wikipedia-article/scripts/fetch_wikipedia_article.py" --title "Affaire des colonels" --dry-run
-```
+## Output du skill
+
+Fais un message de feedback minimal :
+- si l'article est trouvé: lien vers le fichier Markdown généré
+- si l'article n'est pas trouvé: message d'erreur.
 
 ## Notes
 
-- Le skill utilise l'API MediaWiki officielle de Wikipedia.
-- Le Markdown généré conserve une structure de sections autant que possible.
-- `--dry-run` est réservé au debug.
+- S'il y a un problème d'exécution du script, consulte [debug.md](debug.md)
 

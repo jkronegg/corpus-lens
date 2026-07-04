@@ -34,3 +34,6 @@ Par défaut, le Markdown est écrit dans `sources/wikipedia/` avec un front matt
 - `author`
 - `sources`
 
+# Coût
+
+Typique = 1.1 Crédit IA
