@@ -11,19 +11,15 @@ Automates Swissvotes source retrieval for one votation id.
   - official chronology source file (`chronologie_officielle.<ext>`)
   - official chronology as Markdown (`chronologie_officielle.md`)
   - Federal Council message
+  - Debates of the National Council and Council of States
+  - Official results
+  - Le script créé `sources/swissvotes/votation_<votation_id>/` et y écrit:
 - Writes a JSON summary file
 
 For HTML official pages, the script tries to switch to French by using the page alternate link (`rel="alternate"`, `lang="fr"`) and follows the HTTP redirection before saving/conversion.
 
-## Run
+La liste des votations est dans [DATASET CSV 08-04-2026.csv](../analyse-swissvotes-votations/assets/DATASET%20CSV%2008-04-2026.csv)
 
-```powershell
-python -u ".agents/skills/fetch-swissvote-votation-sources/scripts/swissvote_fetch_votation_sources.py" --votation-id 639
-```
+## Coût
 
-## Smoke test
-
-```powershell
-python -u ".agents/skills/fetch-swissvote-votation-sources/scripts/smoke_test_swissvote_fetch_votation_sources.py"
-```
-
+Coût d'un appel avec `/skill:fetch-swissvote-votation-sources`: 1.5 AI credits.
