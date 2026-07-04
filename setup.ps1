@@ -68,15 +68,102 @@ function Resolve-Python {
 function Invoke-Python {
     param(
         [hashtable]$Py,
-        [string[]]$Args
+        [string[]]$PythonArgs
     )
     if ($Py.PrefixArgs.Count -gt 0) {
-        & $Py.Command @($Py.PrefixArgs + $Args)
+        & $Py.Command @($Py.PrefixArgs + $PythonArgs)
     } else {
-        & $Py.Command @Args
+        & $Py.Command @PythonArgs
     }
     if ($LASTEXITCODE -ne 0) {
-        throw "Commande Python echouee: $($Py.Command) $($Args -join ' ')"
+        throw "Commande Python echouee: $($Py.Command) $($PythonArgs -join ' ')"
+    }
+}
+
+function Import-VsDevEnvironment {
+    # Charge l'environnement MSVC (cl.exe, link.exe, etc.) dans la session PowerShell courante.
+    if (-not $IsWindows) {
+        return $false
+    }
+
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (-not (Test-Path $vswhere)) {
+        return $false
+    }
+
+    $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    if ($LASTEXITCODE -ne 0 -or -not $installPath) {
+        return $false
+    }
+
+    $vsDevCmd = Join-Path $installPath "Common7\Tools\VsDevCmd.bat"
+    if (-not (Test-Path $vsDevCmd)) {
+        return $false
+    }
+
+    $envDump = & cmd /c "`"$vsDevCmd`" -no_logo -arch=x64 -host_arch=x64 >nul && set"
+    if ($LASTEXITCODE -ne 0 -or -not $envDump) {
+        return $false
+    }
+
+    foreach ($line in $envDump) {
+        if ($line -match "^[^=]+=.*$") {
+            $idx = $line.IndexOf("=")
+            if ($idx -gt 0) {
+                $name = $line.Substring(0, $idx)
+                $value = $line.Substring($idx + 1)
+                [System.Environment]::SetEnvironmentVariable($name, $value, "Process")
+            }
+        }
+    }
+
+    return $true
+}
+
+function Install-SpacyModel {
+    param(
+        [string]$VenvPython,
+        [string]$Model,
+        [int]$MaxAttempts = 3
+    )
+
+    $pipPackage = $Model -replace "_", "-"
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        if ($attempt -gt 1) {
+            Write-Warning "Nouvelle tentative ($attempt/$MaxAttempts) pour $Model..."
+            # Evite de re-utiliser un artefact pip potentiellement corrompu.
+            try {
+                & $VenvPython -m pip cache purge | Out-Null
+            } catch {
+                # best effort
+            }
+            Start-Sleep -Seconds ([Math]::Min(5 * ($attempt - 1), 15))
+        }
+
+        $previousNoCache = $env:PIP_NO_CACHE_DIR
+        if ($attempt -gt 1) {
+            $env:PIP_NO_CACHE_DIR = "1"
+        }
+
+        try {
+            & $VenvPython -m spacy download $Model
+            if ($LASTEXITCODE -eq 0) {
+                return
+            }
+        } finally {
+            if ($null -eq $previousNoCache) {
+                Remove-Item Env:PIP_NO_CACHE_DIR -ErrorAction SilentlyContinue
+            } else {
+                $env:PIP_NO_CACHE_DIR = $previousNoCache
+            }
+        }
+    }
+
+    Write-Warning "Echec via 'spacy download' pour $Model. Tentative de secours via pip (--no-cache-dir)."
+    & $VenvPython -m pip install --no-cache-dir --upgrade $pipPackage
+    if ($LASTEXITCODE -ne 0) {
+        throw "Echec d'installation du modele spaCy $Model"
     }
 }
 
@@ -87,8 +174,8 @@ Write-Step "Resolution de Python 3.14+"
 $py = Resolve-Python -Requested $PythonExe
 Write-Host "Python detecte: $($py.Version) via '$($py.Command) $($py.PrefixArgs -join ' ')'"
 
-Write-Step "Creation du venv: $VenvPath"
-Invoke-Python -Py $py -Args @("-m", "venv", $VenvPath)
+Write-Step "Creation du venv: $VenvPath (can take some time, please wait)"
+Invoke-Python -Py $py -PythonArgs @("-m", "venv", $VenvPath)
 
 $venvPython = Join-Path $repoRoot (Join-Path $VenvPath "Scripts\python.exe")
 if (-not (Test-Path $venvPython)) {
@@ -119,9 +206,20 @@ if (-not $SkipOptional) {
 
     Write-Step "Installation optionnelle native (best effort): hunspell"
     try {
+        if ($IsWindows -and -not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
+            Write-Host "MSVC (cl.exe) non detecte dans PATH. Tentative de chargement via VsDevCmd..."
+            if (-not (Import-VsDevEnvironment)) {
+                Write-Warning "Impossible de charger l'environnement Visual Studio C++ automatiquement."
+                Write-Warning "Si hunspell echoue, lancez setup.ps1 depuis 'x64 Native Tools Command Prompt for VS'."
+            }
+        }
+
         & $venvPython -m pip install hunspell
         if ($LASTEXITCODE -ne 0) {
-            Write-Warning "hunspell non installe (toolchain native manquante). spylls reste disponible."
+            Write-Warning "hunspell non installe (toolchain native ou dependances C manquantes). spylls reste disponible."
+            if ($IsWindows) {
+                Write-Warning "Sur Windows, verifiez que le workload 'Desktop development with C++' est installe."
+            }
         }
     } catch {
         Write-Warning "hunspell non installe ($($_.Exception.Message)). spylls reste disponible."
@@ -138,14 +236,13 @@ if (-not $SkipPlaywrightBrowsers) {
 
 if (-not $SkipSpacyModels) {
     Write-Step "Installation des modeles spaCy fr/de"
-    & $venvPython -m spacy download fr_core_news_lg
+    & $venvPython -m pip install click
     if ($LASTEXITCODE -ne 0) {
-        throw "Echec d'installation du modele spaCy fr_core_news_lg"
+        throw "Echec d'installation de click (requis pour l'installation des modeles spaCy)"
     }
-    & $venvPython -m spacy download de_core_news_lg
-    if ($LASTEXITCODE -ne 0) {
-        throw "Echec d'installation du modele spaCy de_core_news_lg"
-    }
+
+    Install-SpacyModel -VenvPython $venvPython -Model "fr_core_news_lg"
+    Install-SpacyModel -VenvPython $venvPython -Model "de_core_news_lg"
 }
 
 if (-not $SkipDbInit) {
