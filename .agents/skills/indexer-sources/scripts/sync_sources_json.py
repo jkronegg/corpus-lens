@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TextIO, Optional
 
-ROOT = Path(r"C:\Users\Julien\git\kronegg\histoire_suisse")
+ROOT = Path(__file__).resolve().parents[4]
 SOURCES_DIR = ROOT / "sources"
 AUTHORS_PATH = SOURCES_DIR / "auteurs.json"
 NAMED_ENTITIES_DB_SCRIPTS_DIR = (
@@ -100,10 +100,7 @@ PRIMARY_BINARY_EXTENSIONS = {
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".svg"}
 INDEX_META_FILES = {
-    "auteurs.json",
-    "named_entities.sqlite",
-    "named_entities.sqlite-shm",
-    "named_entities.sqlite-wal",
+    "auteurs.json"
 }
 LOCK_FILE_PREFIXES = ("~$",)
 INDEX_LOCK_FILE = ROOT / ".indexer-sources.lock"

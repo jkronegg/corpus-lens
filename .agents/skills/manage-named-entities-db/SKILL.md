@@ -20,7 +20,7 @@ db:
 
 # Manage Named Entities DB
 
-Ce skill gère la base de données SQLite du projet (`sources/named_entities.sqlite`). Il s'appuie sur le schéma défini dans `.agents/skills/manage-named-entities-db/assets/schema.sql`.
+Ce skill gère la base de données SQLite du projet (`named_entities.sqlite`). Il s'appuie sur le schéma défini dans `.agents/skills/manage-named-entities-db/assets/schema.sql`.
 
 La base est une **source secondaire dérivée** : elle centralise les mentions de personnes (et à terme d'autres entités) extraites des fichiers Markdown du répertoire `sources/`, ainsi que l'index canonique des sources via la table `source`.
 
@@ -41,7 +41,7 @@ La base est une **source secondaire dérivée** : elle centralise les mentions d
 
 ## Inputs communs
 
-- `--db` : chemin vers la base SQLite (défaut: `sources/named_entities.sqlite`)
+- `--db` : chemin vers la base SQLite (défaut: `named_entities.sqlite`)
 
 ## Inputs par sous-commande
 

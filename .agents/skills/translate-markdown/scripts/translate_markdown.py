@@ -12,9 +12,9 @@ from pathlib import Path
 
 from deep_translator import GoogleTranslator
 
-DEFAULT_INPUT = Path(
-    r"C:\Users\Julien\git\kronegg\histoire_suisse\sources\swissvotes\votation_86\debat_parlementaire.md"
-)
+REPO_ROOT = Path(__file__).resolve().parents[4]
+
+DEFAULT_INPUT = REPO_ROOT / "sources" / "swissvotes" / "votation_86" / "debat_parlementaire.md"
 
 GERMAN_HINTS = {
     "der", "die", "das", "und", "mit", "nicht", "eine", "einer", "einem", "eines", "des", "dem", "den",
@@ -39,7 +39,6 @@ FRONT_MATTER_SKIP_KEYS = (
     "language_distribution:",
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
 DB_MODULE_PATH = REPO_ROOT / ".agents" / "skills" / "manage-named-entities-db" / "scripts" / "db.py"
 
 _DB_AVAILABLE = False

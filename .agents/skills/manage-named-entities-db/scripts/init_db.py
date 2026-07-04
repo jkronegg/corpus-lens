@@ -22,7 +22,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 SCRIPT_DIR  = Path(__file__).parent.resolve()
 SKILL_DIR   = SCRIPT_DIR.parent                             # manage-named-entities-db/
-REPO_ROOT   = SKILL_DIR.parents[2]                          # histoire_suisse/
+REPO_ROOT   = SKILL_DIR.parents[2]                          # corpus-lens/
 SCHEMA_FILE = SKILL_DIR / "assets" / "schema.sql"          # versionné dans le skill
 DEFAULT_DB  = REPO_ROOT / "named_entities.sqlite"
 

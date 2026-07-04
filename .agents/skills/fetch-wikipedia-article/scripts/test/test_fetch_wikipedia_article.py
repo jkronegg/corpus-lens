@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-MODULE_PATH = Path(__file__).resolve().parent / "fetch_wikipedia_article.py"
+MODULE_PATH = Path(__file__).resolve().parent.parent / "fetch_wikipedia_article.py"
 
 
 def _load_module():
@@ -99,4 +99,5 @@ class FetchWikipediaArticleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
 

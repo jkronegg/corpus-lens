@@ -12,7 +12,7 @@ Tu prends en compte les éléments suivants pour ton analyse :
 - rumeurs d'ingérence étrangère
 
 Contraintes :
-- uniquement à partir de sources validées dans la table `source` de `sources/named_entities.sqlite`
+- uniquement à partir de sources validées dans la table `source` de `named_entities.sqlite`
 - séparation stricte entre faits et analyse
 - interdiction de projection contemporaine non sourcée
 - traitement objectif du camp du Oui et du Non, sans parti pris

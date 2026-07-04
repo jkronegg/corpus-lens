@@ -34,7 +34,7 @@ SKILL_NAME = "fetch-swissvote-votation-sources"
 # ---------------------------------------------------------------------------
 # Intégration base de données SQLite
 # ---------------------------------------------------------------------------
-_SKILL_REPO_ROOT = Path(__file__).resolve().parents[4]  # histoire_suisse/
+_SKILL_REPO_ROOT = Path(__file__).resolve().parents[4]  # corpus-lens/
 _DB_SCRIPTS_DIR = (
     _SKILL_REPO_ROOT / ".agents" / "skills" / "manage-named-entities-db" / "scripts"
 )

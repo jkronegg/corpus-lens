@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Télécharge l'index Dodis des personnes et remplit assets/persons.csv via CDP.
 
-python -u "C:\Users\Julien\git\kronegg\histoire_suisse\.agents\skills\fetch-dodis-person-details\assets\fetch_dodis_persons_csv.py" --wait-ms 200
+python -u "C:\path_to_project\.agents\skills\fetch-dodis-person-details\assets\fetch_dodis_persons_csv.py" --wait-ms 200
 
-Log de progression : C:/Users/Julien/git/kronegg/histoire_suisse/.agents/skills/fetch-dodis-person-details/assets/fetch_dodis_persons_csv.full.out.log
-CSV cible : C:/Users/Julien/git/kronegg/histoire_suisse/.agents/skills/fetch-dodis-person-details/assets/persons.csv
-State file (reprise) : C:/Users/Julien/git/kronegg/histoire_suisse/.agents/skills/fetch-dodis-person-details/assets/fetch_dodis_persons_state.json
+Log de progression : C:/path_to_project/.agents/skills/fetch-dodis-person-details/assets/fetch_dodis_persons_csv.full.out.log
+CSV cible : C:/path_to_project/.agents/skills/fetch-dodis-person-details/assets/persons.csv
+State file (reprise) : C:/path_to_project/.agents/skills/fetch-dodis-person-details/assets/fetch_dodis_persons_state.json
 
 """
 

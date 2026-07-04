@@ -7,7 +7,7 @@ from playwright.sync_api import sync_playwright
 
 
 BASE = "https://elitessuisses.unil.ch/indexPersonnes.php?l=a"
-DEFAULT_OUT_DIR = Path(r"C:\Users\Julien\git\kronegg\histoire_suisse\sortie")
+DEFAULT_OUT_DIR = Path(__file__).resolve().parents[4] / "sortie"
 HEADERS = ["nom", "prénom", "dates", "mandats", "Projet", "URL"]
 
 

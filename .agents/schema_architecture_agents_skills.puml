@@ -42,7 +42,7 @@ package "Skills - transformation" as SK_TRANSFORM {
 
 package "Corpus local" as CORPUS {
   collections "sources/" as SRC
-  rectangle "table source\ndans sources/named_entities.sqlite" as IDX
+  rectangle "table source\ndans named_entities.sqlite" as IDX
   rectangle "sources/named_entities.sqlite" as NEDB
 }
 

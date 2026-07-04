@@ -1,6 +1,6 @@
 ---
 titre: "CODEBOOK"
-source: "C:\Users\Julien\git\kronegg\histoire_suisse\.agents\skills\analyse-swissvotes-votations\assets\CODEBOOK.pdf"
+source: ".agents\skills\analyse-swissvotes-votations\assets\CODEBOOK.pdf"
 date_extraction: "2026-05-24T00:06:22.312465"
 pages: "49"
 transformation_by: "skill extract-pdf-to-md"

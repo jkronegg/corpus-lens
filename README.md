@@ -31,7 +31,7 @@ Les documents récupérés (notamment PDF/HTML) peuvent être transformés en Ma
 
 ### 3) Indexation centralisée des sources
 
-Le projet maintient un index canonique des sources dans `sources/named_entities.sqlite` (table `source`) pour :
+Le projet maintient un index canonique des sources dans `named_entities.sqlite` (table `source`) pour :
 - éviter les doublons ;
 - stabiliser les identifiants techniques ;
 - garantir une base cohérente pour les analyses ultérieures.
@@ -87,13 +87,14 @@ Le projet fournit un script unique `setup.ps1` pour creer le venv et installer:
 - les dependances optionnelles (`requirements-optional.txt`)
 - Chromium pour Playwright
 - les modeles spaCy (`fr_core_news_lg`, `de_core_news_lg`)
-- la base SQLite `sources\named_entities.sqlite` (initialisation)
+- la base SQLite `named_entities.sqlite` (initialisation)
 
 ### Installation standard
 
 ```powershell
 .\setup.ps1
 ```
+L'installation prend plusieurs minutes car il y a environ 2 GB de téléchargement (librairies, modèles, ...).
 
 ### Avec un executable Python explicite
 

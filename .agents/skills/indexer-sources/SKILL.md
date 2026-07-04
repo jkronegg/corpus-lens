@@ -1,11 +1,11 @@
 ---
 name: indexer-sources
-description: Synchronize sources metadata into the `source` table of `sources/named_entities.sqlite`.
+description: Synchronize sources metadata into the `source` table of `named_entities.sqlite`.
 ---
 
 # Sync Sources SQLite
 
-Ce skill lance le script de synchronisation des sources et met à jour la table `source` de `sources/named_entities.sqlite`.
+Ce skill lance le script de synchronisation des sources et met à jour la table `source` de `named_entities.sqlite`.
 
 ## Inputs
 
@@ -13,7 +13,7 @@ Ce skill lance le script de synchronisation des sources et met à jour la table 
 
 ## Outputs
 
-- Met à jour la table `source` de `sources/named_entities.sqlite`.
+- Met à jour la table `source` de `named_entities.sqlite`.
 - Affiche un resume en sortie standard (`ok: ... sources synchronisees` ou erreurs bloquantes).
 
 ## Commande

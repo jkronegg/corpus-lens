@@ -189,8 +189,8 @@ def resolve_reference_number(href: str, reference_numbers: dict[str, int] | None
     return reference_numbers.get(fragment)
 
 
-def download_image(image_url: str, output_dir: Path, lang: str) -> str | None:
-    """Télécharge une image et retourne son chemin relatif, ou None en cas d'erreur."""
+def download_image(image_url: str, images_dir: Path, markdown_image_prefix: str, lang: str) -> str | None:
+    """Télécharge une image et retourne son chemin relatif Markdown, ou None en cas d'erreur."""
     try:
         image_url = normalize_image_url(image_url, lang)
         if not image_url:
@@ -205,24 +205,26 @@ def download_image(image_url: str, output_dir: Path, lang: str) -> str | None:
         parsed_url = urlparse(image_url)
         filename = Path(parsed_url.path).name or f"image_{url_hash}"
 
-        # Créer le dossier images s'il n'existe pas
-        images_dir = output_dir / "images"
+        # Créer le sous-répertoire d'images propre au document s'il n'existe pas.
         images_dir.mkdir(parents=True, exist_ok=True)
 
         filepath = images_dir / filename
         filepath.write_bytes(response.content)
 
-        # Retourner le chemin relatif
-        return f"images/{filename}"
+        # Retourner le chemin relatif attendu depuis le Markdown.
+        return f"{markdown_image_prefix}/{filename}"
     except Exception as exc:
         print(f"[WARN] Impossible de télécharger {image_url}: {exc}")
         return None
 
 
-def extract_and_download_images(html: str, output_dir: Path, lang: str) -> dict[str, str]:
+def extract_and_download_images(html: str, output_dir: Path, lang: str, document_key: str) -> dict[str, str]:
     """Extrait les images du HTML et les télécharge. Retourne un mapping URL -> chemin local."""
     soup = BeautifulSoup(html or "", "html.parser")
     images_mapping = {}
+    safe_document_key = slugify(document_key)
+    images_dir = output_dir / "images" / safe_document_key
+    markdown_image_prefix = f"images/{safe_document_key}"
 
     for img in soup.find_all("img"):
         src = img.get("src", "").strip()
@@ -235,7 +237,7 @@ def extract_and_download_images(html: str, output_dir: Path, lang: str) -> dict[
 
         # Ne télécharger que si pas déjà fait
         if full_url not in images_mapping:
-            local_path = download_image(full_url, output_dir, lang)
+            local_path = download_image(full_url, images_dir, markdown_image_prefix, lang)
             if local_path:
                 images_mapping[full_url] = local_path
                 images_mapping[src] = local_path  # Mapper aussi l'URL originale
@@ -625,9 +627,9 @@ def main() -> int:
         )
         return 0
 
-    # Créer le dossier de sortie et télécharger les images
+    # Créer le dossier de sortie et télécharger les images dans un sous-répertoire dédié au document.
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    images_mapping = extract_and_download_images(article["html"], args.out_dir, args.lang)
+    images_mapping = extract_and_download_images(article["html"], args.out_dir, args.lang, output_path.stem)
 
     body_md = html_to_markdown(article["html"], images_mapping)
     markdown = build_markdown(args.title, args.lang, article, body_md)

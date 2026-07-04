@@ -29,8 +29,8 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 # Chemins par défaut
 # ---------------------------------------------------------------------------
-_REPO_ROOT = Path(__file__).resolve().parents[4]  # histoire_suisse/
-DEFAULT_DB = _REPO_ROOT / "sources" / "named_entities.sqlite"
+_REPO_ROOT = Path(__file__).resolve().parents[4]  # corpus-lens/
+DEFAULT_DB = _REPO_ROOT / "named_entities.sqlite"
 DEFAULT_SCHEMA = (
     _REPO_ROOT
     / ".agents"

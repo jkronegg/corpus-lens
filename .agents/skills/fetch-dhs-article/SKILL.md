@@ -41,7 +41,7 @@ After using this skill, do **not** verify that the articles and images are prope
 Do **not** use this skill when you need to:
 
 - analyse the historical content of already fetched sources
-- synchroniser la table `source` de `sources/named_entities.sqlite`
+- synchroniser la table `source` de `named_entities.sqlite`
 - convert arbitrary PDFs to Markdown
 - search external sites other than DHS
 
@@ -100,7 +100,7 @@ python -u ".agents/skills/fetch-dhs-article/scripts/dhs_fetch_article.py" `
   --term "Union nationale" `
   --term "Fascisme" `
   --term "Antifascisme" `
-  --out-dir "C:\Users\Julien\git\kronegg\histoire_suisse\sources\DHS"
+  --out-dir "C:\path\to\project\sources\DHS"
 ```
 
 ### Overwrite previously generated files
