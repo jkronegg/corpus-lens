@@ -1001,7 +1001,7 @@ def _extract_results_on_page(page) -> list[SearchResult]:
             SearchResult(
                 article_type=article_type,
                 title=clean_title,
-                date_publication=_format_result_date(raw_date),
+                date=_format_result_date(raw_date),
                 newspaper=_clean_newspaper_name(row.get("newspaper")),
                 snippet=_norm_ws(row.get("snippet") or "") or None,
                 article_url=_norm_ws(row.get("article_url") or "") or None,
