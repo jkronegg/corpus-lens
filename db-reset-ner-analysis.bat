@@ -1,0 +1,1 @@
+python -u ".agents/skills/manage-named-entities-db/scripts/manage_named_entities_db.py" reset-ner-analysis

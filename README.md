@@ -118,4 +118,4 @@ L'installation prend plusieurs minutes car il y a environ 2 GB de téléchargeme
 ## Coût IA
 
 Le projet utilise un LLM pour la recherche documentaire. Le coût dépend de l'usage et du fournisseur de LLM choisi. Il est recommandé de surveiller les quotas et les coûts associés à l'utilisation du LLM, surtout lors de requêtes fréquentes ou de gros volumes de données.
-Les skills et agents de `corpus-lens` sont conçus pour minimiser la consommation de tokens.
+Les skills et agents de `corpus-lens` sont conçus pour [minimiser la consommation de tokens](doc/costs.md).
