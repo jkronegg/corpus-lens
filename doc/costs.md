@@ -32,6 +32,20 @@ Il n'est donc pas nécessaire de connaître le nom exact des skills.
 | fetch-enewspaper-article-content | 4.1                                       |
 | fetch-enewspaper-article-list | 4.8                                       |
 
+Ces skills sont également disponibles via la ligne de commande (CLI). Dans ce cas, il n'y a pas de coût en crédits IA.
+
+    fetch <source> <requête> [options]
+
+Exemples:
+
+    fetch dhs "affaire des colonels"
+    fetch wikipedia "affaire des colonels"
+    fetch dodis-person "Jean Pascal Delamuraz"
+    fetch elitesuisse "Thierry Pun"
+    fetch enewspaper "affaire des colonels" --start-year 1900
+    fetch url "https://example.com/document.pdf"
+    fetch swissvote 639
+
 ## Analyse skills
 
 | Skill | Coût d'exécution via `/skill` (IA credit) | 
