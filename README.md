@@ -108,6 +108,15 @@ L'installation prend plusieurs minutes car il y a environ 2 GB de téléchargeme
 .\.venv\Scripts\Activate.ps1
 ```
 
+L'environnement virtuel peut être activé pour chaque terminal ouvert en modifiant la commande de démarrage du terminal:
+![Configuration IntelliJ Tools>Terminal](doc/terminal_open_settings.png)
+
+    powershell.exe -NoExit -Command "& { . .\.venv\Scripts\Activate.ps1 }"
+
+Si vous effectuez cette configuration, vous pouvez supprimer la première ligne de `.github/copilot-instructions.md` (cela permet d'éviter une consommation de token à chaque requête):
+
+    Lorsque tu ouvres un terminal, exécute le script .\.venv\Scripts\Activate.ps1 afin d'activer l'environnement virtuel Python.
+
 ### Options utiles
 
 - `-SkipOptional` : saute les librairies optionnelles.

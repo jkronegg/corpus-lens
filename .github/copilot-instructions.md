@@ -1,0 +1,1 @@
+Lorsque tu ouvres un terminal, exécute le script `.\.venv\Scripts\Activate.ps1` afin d'activer l'environnement virtuel Python.
