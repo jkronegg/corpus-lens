@@ -72,6 +72,12 @@ Le projet suit un principe central :
 
 Autrement dit, l'outil assiste la recherche (repérage, synthèse initiale, navigation dans les sources), tandis que l'analyse scientifique, la contextualisation et les conclusions demeurent sous la responsabilité de l'historien.
 
+## Comparatif `corpus-lens` et ChatGPT
+
+Une analyse critique réalisée à partir du cas de l'affaire des colonels montre que ChatGPT peut produire rapidement des réponses fluides qui peuvent donner l'illusion de maîtrise si les sources ne sont pas effectivement consultées, vérifiées et correctement délimitées. À l'inverse, `corpus-lens` est moins immédiat, mais mieux adapté à une recherche historique sérieuse dès lors que l'on cherche à télécharger les documents, conserver une trace locale, distinguer les sources primaires et secondaires, et revenir aux pièces exactes dans un cadre plus reproductible.
+
+Voir l'analyse détaillée : [`doc/comparatif_chatgpt_corpus-lens/corpus-lens-vs-chatgpt-affaire-colonels.md`](doc/comparatif_chatgpt_corpus-lens/corpus-lens-vs-chatgpt-affaire-colonels.md)
+
 ## Requiert
 
 - Framework IA agentique (p.ex. GitHub Copilot, OpenAI Codex, Claude Code)
