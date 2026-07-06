@@ -1,6 +1,6 @@
 ---
 name: fetch-generic-url
-description: Télécharge des documents depuis des URLs génériques (PDF, HTML, etc.) avec support des webpages et gestion des redirects.
+description: Télécharge des documents depuis des URLs génériques (PDF, HTML, etc.) avec support des webpages et gestion des redirects. Ne pas utiliser pour DHS, Dodis, e-newspaperarchive, elitesuisse.
 capabilities:
   - url-download
   - document-extraction

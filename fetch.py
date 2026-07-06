@@ -19,6 +19,7 @@ Exemples:
     python fetch.py url "https://example.com"
     python fetch.py swissvote 639
     python fetch.py dodis "https://dodis.ch/search?q=panama&c=Document"
+    python fetch.py dodis-document 43445
 """
 
 from __future__ import annotations
@@ -67,6 +68,13 @@ SUBCOMMANDS: dict[str, dict[str, Any]] = {
         "usage": "fetch dodis-person <nom complet>",
     },
     "dodis-p": {"alias": "dodis-person"},
+    "dodis-document": {
+        "script": ".agents/skills/fetch-dodis-document-content/scripts/fetch_dodis_document_content.py",
+        "primary_flag": "--document-id",
+        "help": "Exporte le contenu d'un document Dodis par identifiant.",
+        "usage": "fetch dodis-document <identifiant>",
+    },
+    "dodis-doc": {"alias": "dodis-document"},
     "elitesuisse": {
         "script": ".agents/skills/fetch-elitesuisse-person-details/scripts/fetch_elitesuisse_person_details.py",
         "primary_flag": "--name",
@@ -146,6 +154,7 @@ def print_help() -> None:
     print('  fetch url "https://example.com/document.pdf"')
     print('  fetch swissvote 639')
     print('  fetch dodis "https://dodis.ch/search?q=panama&c=Document"')
+    print('  fetch dodis-document 43445')
     print()
     print("Options génériques (passées directement au script sous-jacent):")
     print("  --dry-run          Vérifie sans télécharger")
@@ -227,5 +236,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
 
