@@ -205,6 +205,18 @@ def normalize_search_text(value: str) -> str:
     return slugify(value).replace("_", " ")
 
 
+def normalize_numeric_id(value: str) -> str:
+    """Normalise un identifiant numerique pour comparaison (ignore les zeros de tete)."""
+    digits = re.sub(r"\D+", "", value or "")
+    if not digits:
+        return ""
+    return digits.lstrip("0") or "0"
+
+
+def is_numeric_term(value: str) -> bool:
+    return bool(re.fullmatch(r"\d+", (value or "").strip()))
+
+
 def normalize_url(url: str) -> str:
     normalized = (url or "").strip()
     if not normalized:
@@ -657,6 +669,12 @@ def discover_catalog_csv_files(csv_dir: Path, csv_glob: str) -> List[Path]:
 
 def row_match_score(row: Dict[str, str], term: str) -> int:
     """Score simple: exact lemma > exact autres champs > contient."""
+    if is_numeric_term(term):
+        target_id = normalize_numeric_id(term)
+        row_id = normalize_numeric_id(row.get("ID", ""))
+        if target_id and row_id and target_id == row_id:
+            return 1000
+
     target = normalize_search_text(term)
     lemma = normalize_search_text(row.get("Lemma", ""))
     complement = normalize_search_text(row.get("Complement", ""))
