@@ -646,7 +646,7 @@ def _is_html_like_url(url: str) -> bool:
 
 
 def _md5_file(path: Path) -> str:
-    """Calcule le hash MD5 d'un fichier (identifiant_technique)."""
+    """Calcule le hash MD5 d'un fichier (signature)."""
     digest = hashlib.md5()
     with path.open("rb") as fh:
         while True:
@@ -712,7 +712,7 @@ def _build_source_entry_from_family(
     has_markdown = any(path.suffix.lower() == ".md" for path, _, _ in items)
 
     return {
-        "identifiant_technique": _md5_file(principal_path),
+        "signature": _md5_file(principal_path),
         "identifiant_source": _build_identifiant_source(votation_id, family),
         "titre": titre_template.format(id=votation_id),
         "date_publication": "0000-00-00",
@@ -725,9 +725,7 @@ def _build_source_entry_from_family(
         "DOI": "",
         "URL": principal_url,
         "langues": "fr:100" if has_markdown else None,
-        "pertinence": 0.8,
         "type_source": "primaire",
-        "lisible": True,
         "nombre_pages": -1,
         "categorie": "document officiel",
         "extrait_brut": "",

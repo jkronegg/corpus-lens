@@ -95,7 +95,7 @@ def cmd_list_sources(args: argparse.Namespace) -> None:
     sources = _db.list_sources(
         con,
         limit=args.limit,
-        identifiant_technique=args.identifiant_technique,
+        signature=args.signature,
         url=args.url,
         origine=args.origine,
     )
@@ -147,7 +147,7 @@ def cmd_reset_ner_analysis(args: argparse.Namespace) -> None:
 def cmd_upsert_source(args: argparse.Namespace) -> None:
     con = _db.get_connection(args.db)
     source = {
-        "identifiant_technique": args.identifiant_technique or "",
+        "signature": args.signature or "",
         "identifiant_source": args.identifiant_source or "",
         "titre": args.titre or "",
         "date_publication": args.date_publication or "0000-00-00",
@@ -161,9 +161,7 @@ def cmd_upsert_source(args: argparse.Namespace) -> None:
         "DOI": args.doi or "",
         "URL": args.url or "",
         "langues": args.langues or None,
-        "pertinence": args.pertinence,
         "type_source": args.type_source or "secondaire",
-        "lisible": args.lisible,
         "nombre_pages": args.nombre_pages,
         "categorie": args.categorie or "autre",
         "extrait_brut": args.extrait_brut or "",
@@ -173,6 +171,7 @@ def cmd_upsert_source(args: argparse.Namespace) -> None:
         "relative_path": args.relative_path or "",
         "author": args.author or "",
         "ner_status": args.ner_status,
+        "ocr_status": args.ocr_status,
     }
     result = _db.upsert_source(con, source)
     _out(result)
@@ -240,10 +239,11 @@ def build_parser() -> argparse.ArgumentParser:
     # ---- list-sources ----
     p_ls = sub.add_parser("list-sources", help="Liste les sources indexées dans SQLite.")
     p_ls.add_argument(
+        "--signature",
         "--identifiant-technique",
-        dest="identifiant_technique",
+        dest="signature",
         default=None,
-        help="Filtrer par identifiant technique exact",
+        help="Filtrer par signature exacte",
     )
     p_ls.add_argument(
         "--url",
@@ -302,8 +302,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ---- upsert-source ----
     p_us = sub.add_parser("upsert-source", help="Crée ou met à jour une source (ou un document dérivé).")
-    p_us.add_argument("--identifiant-technique", dest="identifiant_technique", default="",
-                      help="Identifiant technique stable (MD5 du fichier si omis pour une source originale)")
+    p_us.add_argument("--signature", "--identifiant-technique", dest="signature", default="",
+                      help="Signature stable (MD5 du fichier si omise pour une source originale)")
     p_us.add_argument("--identifiant-source", dest="identifiant_source", required=True,
                       help="Identifiant lisible de la source (ex. 'swissvotes-86')")
     p_us.add_argument("--titre", required=True, help="Titre de la source")
@@ -322,13 +322,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_us.add_argument("--doi", default="", help="DOI")
     p_us.add_argument("--url", default="", help="URL canonique de la source")
     p_us.add_argument("--langues", default=None, help="Langue(s) du document (ex. 'fr')")
-    p_us.add_argument("--pertinence", type=float, default=0.0,
-                      help="Score de pertinence 0.0–1.0 (défaut: 0.0)")
     p_us.add_argument("--type-source", dest="type_source", default="secondaire",
                       choices=["primaire", "secondaire", "tertiaire"],
                       help="Type de source (défaut: secondaire)")
-    p_us.add_argument("--lisible", action="store_true", default=False,
-                      help="Indique que le document est lisible/indexable")
     p_us.add_argument("--nombre-pages", dest="nombre_pages", type=int, default=-1,
                       help="Nombre de pages (-1 si inconnu)")
     p_us.add_argument("--categorie", default="autre",
@@ -346,6 +342,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_us.add_argument("--ner-status", dest="ner_status", type=int, default=None,
                       choices=[0, 1, 2],
                       help="Statut NER du document (0=non traité, 1=à traiter, 2=traité)")
+    p_us.add_argument("--ocr-status", dest="ocr_status", default=None,
+                      choices=["P", "T", "D", "F", "N"],
+                      help="Statut OCR de la source originale (P, T, D, F, N)")
 
     return parser
 

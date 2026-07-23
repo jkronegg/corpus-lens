@@ -127,7 +127,7 @@ def test_render_vote_markdown_from_key_value_tables() -> None:
     assert "[Lien](https://swissvotes.ch/ch/f/pore/rf/cr/2018/20180292.html)" in markdown
 
 
-def test_identifiant_technique_uses_file_content_md5() -> None:
+def test_signature_uses_file_content_md5() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
         first = root / "doc_a.pdf"
@@ -150,7 +150,7 @@ def test_identifiant_technique_uses_file_content_md5() -> None:
 
         assert entry_a is not None
         assert entry_b is not None
-        assert entry_a["identifiant_technique"] == entry_b["identifiant_technique"]
+        assert entry_a["signature"] == entry_b["signature"]
 
 
 def main() -> int:
@@ -163,7 +163,7 @@ def main() -> int:
     test_extract_official_links_fallback_french_chronology_url()
     test_convert_chronology_html_to_markdown()
     test_render_vote_markdown_from_key_value_tables()
-    test_identifiant_technique_uses_file_content_md5()
+    test_signature_uses_file_content_md5()
     print("OK: smoke_test_swissvote_fetch_votation_sources")
     return 0
 

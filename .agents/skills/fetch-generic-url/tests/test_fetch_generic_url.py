@@ -3,15 +3,13 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
-import json
 import sys
 import tempfile
 import unittest
-from io import BytesIO
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch
-from urllib.parse import urljoin
+from unittest.mock import Mock, patch
 
 # Add scripts directory to path for imports
 SCRIPT_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -46,6 +44,24 @@ class TestSlugify(unittest.TestCase):
         self.assertEqual(result, "12345")
 
 
+class TestUrlStorageSubdir(unittest.TestCase):
+    """Tests for URL-derived storage subdirectories."""
+
+    def test_ignores_query_and_cleans_last_segment(self):
+        result = dgu.url_storage_subdir(
+            "https://www.saint-george.ch/f/vie-politique/conseil_communal/archives.asp?annee=2024"
+        )
+        self.assertEqual(result, Path("vie_politique") / "conseil_communal" / "archives")
+
+    def test_root_url_uses_hostname(self):
+        result = dgu.url_storage_subdir("https://www.saint-george.ch/?annee=2024")
+        self.assertEqual(result, Path("www_saint_george_ch"))
+
+    def test_only_last_segment_is_cleaned(self):
+        result = dgu.url_storage_subdir("https://example.com/v1.2/archive.asp")
+        self.assertEqual(result, Path("v1_2") / "archive")
+
+
 class TestYamlEscape(unittest.TestCase):
     """Tests for YAML escaping."""
     
@@ -64,24 +80,24 @@ class TestYamlEscape(unittest.TestCase):
 
 
 class TestGenerateTechnique(unittest.TestCase):
-    """Tests for identifiant_technique generation."""
+    """Tests for signature generation."""
     
     def test_generate_identifiant_deterministic(self):
         path = "/sources/test/document.pdf"
-        result1 = dgu.generate_identifiant_technique(path)
-        result2 = dgu.generate_identifiant_technique(path)
+        result1 = dgu.generate_signature(path)
+        result2 = dgu.generate_signature(path)
         self.assertEqual(result1, result2)
     
     def test_generate_identifiant_is_md5(self):
         path = "/sources/test/document.pdf"
-        result = dgu.generate_identifiant_technique(path)
+        result = dgu.generate_signature(path)
         # MD5 hex is 32 characters
         self.assertEqual(len(result), 32)
         self.assertTrue(all(c in "0123456789abcdef" for c in result))
     
     def test_generate_identifiant_different_for_different_paths(self):
-        result1 = dgu.generate_identifiant_technique("/path1")
-        result2 = dgu.generate_identifiant_technique("/path2")
+        result1 = dgu.generate_signature("/path1")
+        result2 = dgu.generate_signature("/path2")
         self.assertNotEqual(result1, result2)
 
     def test_generate_identifiant_uses_file_content_hash(self):
@@ -92,8 +108,8 @@ class TestGenerateTechnique(unittest.TestCase):
             first_path.write_bytes(content)
             second_path.write_bytes(content)
 
-            result1 = dgu.generate_identifiant_technique(str(first_path))
-            result2 = dgu.generate_identifiant_technique(str(second_path))
+            result1 = dgu.generate_signature(str(first_path))
+            result2 = dgu.generate_signature(str(second_path))
 
             self.assertEqual(result1, hashlib.md5(content).hexdigest())
             self.assertEqual(result1, result2)
@@ -341,7 +357,7 @@ class TestFrontMatter(unittest.TestCase):
         self.assertIn("date_consultation:", front_matter)
         self.assertIn("transformation_by:", front_matter)
         self.assertIn("sources:", front_matter)
-        self.assertIn("identifiant_technique:", front_matter)
+        self.assertIn("signature:", front_matter)
     
     def test_front_matter_valid_yaml(self):
         front_matter = dgu.generate_front_matter("Test Title", "https://example.com/test")
@@ -577,6 +593,68 @@ class TestArgumentParsing(unittest.TestCase):
             self.assertEqual(args.max_redirects, 5)
             self.assertTrue(args.follow_links)
             self.assertTrue(args.dry_run)
+
+
+class TestMainRouting(unittest.TestCase):
+    """Tests for main() routing and output directory resolution."""
+
+    @patch('fetch_generic_url.handle_webpage_with_document_type')
+    @patch('fetch_generic_url.get_content_type')
+    @patch('fetch_generic_url.requests.Session')
+    def test_main_uses_url_specific_subdir_for_document_type_webpage(self, mock_session_cls, mock_get_content_type, mock_handle):
+        mock_get_content_type.return_value = ("text/html", ".html", True)
+        mock_handle.return_value = {"success": True, "files": []}
+        dgu.DB_AVAILABLE = False
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = argparse.Namespace(
+                url="https://www.saint-george.ch/f/vie-politique/conseil_communal/archives.asp?annee=2024",
+                document_type="pdf",
+                out_dir=Path(tmpdir),
+                dry_run=False,
+                max_redirects=3,
+                follow_links=False,
+                background_download=False,
+                worklist_file=None,
+                max_download_attempts=4,
+                run_worklist_worker=False,
+            )
+
+            with patch('fetch_generic_url.parse_args', return_value=args):
+                dgu.main()
+
+        called_output_dir = mock_handle.call_args.args[1]
+        expected = Path(tmpdir).resolve() / "vie_politique" / "conseil_communal" / "archives"
+        self.assertEqual(called_output_dir, expected)
+
+    @patch('fetch_generic_url.handle_direct_document')
+    @patch('fetch_generic_url.get_content_type')
+    @patch('fetch_generic_url.requests.Session')
+    def test_main_warns_and_ignores_document_type_for_direct_document(self, mock_session_cls, mock_get_content_type, mock_handle):
+        mock_get_content_type.return_value = ("application/pdf", ".pdf", False)
+        mock_handle.return_value = {"success": True, "file": "dummy.pdf"}
+        dgu.DB_AVAILABLE = False
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = argparse.Namespace(
+                url="https://example.com/document.pdf",
+                document_type="pdf",
+                out_dir=Path(tmpdir),
+                dry_run=False,
+                max_redirects=3,
+                follow_links=False,
+                background_download=False,
+                worklist_file=None,
+                max_download_attempts=4,
+                run_worklist_worker=False,
+            )
+
+            with patch('fetch_generic_url.parse_args', return_value=args), patch('builtins.print') as mock_print:
+                dgu.main()
+
+        warning_messages = [str(call.args[0]) for call in mock_print.call_args_list if call.args]
+        self.assertTrue(any("--document-type ignoré" in message for message in warning_messages))
+        mock_handle.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -71,7 +71,7 @@ La base est une **source secondaire dérivée** : elle centralise les mentions d
 - `--limit` : nombre max de résultats (défaut: 50)
 
 ### `list-sources`
-- `--identifiant-technique` : filtre par identifiant technique exact
+- `--signature` : filtre par signature exacte
 - `--url` : filtre par URL exacte (tolérance sur le slash final)
 - `--origine` : filtre par origine (contains)
 - `--limit` : nombre max de sources renvoyées (défaut: 50)
@@ -99,7 +99,7 @@ Toutes les sous-commandes émettent un objet JSON sur stdout :
 - `add-mention` → `{"action": "created"|"skipped", "mention_id": ..., "reason": ...}`
 - `search-person` → `{"results": [{"person_id", "key", "display_name", "aliases_names", "mention_count"}, ...]}`
 - `list-mentions` → `{"mentions": [{"mention_id", "person_key", "person_name", "source", "page", ...}, ...]}`
-- `list-sources` → `{"sources": [{"identifiant_source", "titre", "origine", ...}, ...]}`
+- `list-sources` → `{"sources": [{"signature", "identifiant_source", "titre", "origine", ...}, ...]}`
 - `list-source-documents` → `{"source_documents": [{"id", "path", "parent_doc_id", "ner_status", ...}, ...]}` (origine si `parent_doc_id=null`, dérivé sinon)
 - `stats` → `{"persons": ..., "mentions": ..., "sources": ..., "extractors": {...}}`
 - `export-person` → objet JSON complet personne + `mentions` + `mention_count`

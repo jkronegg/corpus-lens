@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,11 +34,11 @@ class NamedEntitiesDbTests(unittest.TestCase):
         self.con.close()
         self.tmpdir.cleanup()
 
-    def _source_entry(self, *, identifiant_suffix: str = "1", origine: str = "sources/tests/source.md") -> dict:
+    def _source_entry(self, *, signature_suffix: str = "1", origine: str = "sources/tests/source.md") -> dict:
         return {
-            "identifiant_technique": f"tech-{identifiant_suffix}",
-            "identifiant_source": f"src-{identifiant_suffix}",
-            "titre": f"Titre {identifiant_suffix}",
+            "signature": f"tech-{signature_suffix}",
+            "identifiant_source": f"src-{signature_suffix}",
+            "titre": f"Titre {signature_suffix}",
             "date_publication": "2020-01-01",
             "date_consultation": "2020-01-02",
             "origine": origine,
@@ -48,9 +49,7 @@ class NamedEntitiesDbTests(unittest.TestCase):
             "DOI": "",
             "URL": "",
             "langues": "fr",
-            "pertinence": 0.75,
             "type_source": "secondaire",
-            "lisible": True,
             "nombre_pages": 12,
             "categorie": "histoire",
             "extrait_brut": "Extrait",
@@ -67,8 +66,74 @@ class NamedEntitiesDbTests(unittest.TestCase):
         self.assertEqual(self.con.execute("PRAGMA foreign_keys").fetchone()[0], 1)
         mention_columns = [row[1] for row in self.con.execute("PRAGMA table_info(mention)")]
         source_doc_columns = [row[1] for row in self.con.execute("PRAGMA table_info(source_document)")]
+        source_columns = [row[1] for row in self.con.execute("PRAGMA table_info(source)")]
         self.assertIn("source_document_id", mention_columns)
         self.assertIn("parent_doc_id", source_doc_columns)
+        self.assertIn("ocr_status", source_columns)
+        self.assertIn("signature", source_columns)
+
+    def test_get_connection_migrates_legacy_source_identifiant_technique_to_signature(self) -> None:
+        legacy_db_path = self.workdir / "legacy_named_entities.sqlite"
+        legacy_con = sqlite3.connect(legacy_db_path)
+        try:
+            legacy_con.executescript(
+                """
+                CREATE TABLE source (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    identifiant_technique TEXT NOT NULL UNIQUE,
+                    identifiant_source TEXT NOT NULL UNIQUE,
+                    titre TEXT NOT NULL,
+                    date_publication TEXT NOT NULL DEFAULT '0000-00-00',
+                    date_consultation TEXT NOT NULL DEFAULT '0000-00-00',
+                    origine TEXT NOT NULL UNIQUE,
+                    auteurs_json TEXT NOT NULL DEFAULT '[]',
+                    periodes_json TEXT NOT NULL DEFAULT '[]',
+                    isbn TEXT NOT NULL DEFAULT '',
+                    issn TEXT NOT NULL DEFAULT '',
+                    doi TEXT NOT NULL DEFAULT '',
+                    url TEXT NOT NULL DEFAULT '',
+                    langues TEXT,
+                    type_source TEXT NOT NULL DEFAULT 'secondaire',
+                    nombre_pages INTEGER NOT NULL DEFAULT -1,
+                    categorie TEXT NOT NULL DEFAULT 'autre',
+                    extrait_brut TEXT NOT NULL DEFAULT '',
+                    resume TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT '2020-01-01T00:00:00Z',
+                    updated_at TEXT NOT NULL DEFAULT '2020-01-01T00:00:00Z'
+                );
+                INSERT INTO source (
+                    identifiant_technique, identifiant_source, titre,
+                    date_publication, date_consultation, origine,
+                    auteurs_json, periodes_json, isbn, issn, doi, url,
+                    langues, type_source, nombre_pages, categorie, extrait_brut, resume,
+                    created_at, updated_at
+                ) VALUES (
+                    'legacy-signature', 'legacy-src', 'Titre legacy',
+                    '2020-01-01', '2020-01-02', 'sources/tests/legacy.md',
+                    '[]', '[]', '', '', '', '',
+                    'fr', 'secondaire', 1, 'autre', '', '',
+                    '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z'
+                );
+                """
+            )
+            legacy_con.commit()
+        finally:
+            legacy_con.close()
+
+        migrated_con = DB.get_connection(legacy_db_path)
+        try:
+            source_columns = [row[1] for row in migrated_con.execute("PRAGMA table_info(source)")]
+            self.assertIn("signature", source_columns)
+            self.assertNotIn("identifiant_technique", source_columns)
+
+            stored = migrated_con.execute(
+                "SELECT signature, identifiant_source, ocr_status FROM source WHERE identifiant_source = ?",
+                ("legacy-src",),
+            ).fetchone()
+            self.assertEqual(stored["signature"], "legacy-signature")
+            self.assertEqual(stored["ocr_status"], "N")
+        finally:
+            migrated_con.close()
 
     def test_upsert_person_search_person_and_stats(self) -> None:
         """Une personne s'enregistre, se met à jour, est retrouvée par recherche, et les stats sont correctes"""
@@ -108,9 +173,7 @@ class NamedEntitiesDbTests(unittest.TestCase):
             issn="456",
             doi="10.1234/example",
             langues="de",
-            pertinence=0.9,
             type_source="primaire",
-            lisible=True,
             nombre_pages=2,
             categorie="archive",
             extrait_brut="Extrait",
@@ -134,8 +197,10 @@ class NamedEntitiesDbTests(unittest.TestCase):
 
         sources = DB.list_sources(self.con)
         self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0]["signature"], DB._md5_file(origin))
         self.assertEqual(sources[0]["identifiant_source"], "downloaded-1")
         self.assertEqual(sources[0]["origine"], origin.resolve().relative_to(REPO_ROOT).as_posix())
+        self.assertEqual(sources[0]["ocr_status"], "N")
 
         source_documents = self.con.execute(
             "SELECT id, path, parent_doc_id, source_id, ner_status FROM source_document ORDER BY path"
@@ -244,7 +309,7 @@ class NamedEntitiesDbTests(unittest.TestCase):
 
     def test_reset_ner_analysis_clears_entities_mentions_and_resets_status(self) -> None:
         DB.upsert_person(self.con, "Karl Egli", "Karl Egli")
-        src = self._source_entry(identifiant_suffix="reset", origine="sources/tests/reset.md")
+        src = self._source_entry(signature_suffix="reset", origine="sources/tests/reset.md")
         DB.upsert_source(self.con, src)
 
         self.con.execute(
@@ -284,18 +349,62 @@ class NamedEntitiesDbTests(unittest.TestCase):
         DB.replace_sources(
             self.con,
             [
-                self._source_entry(identifiant_suffix="b", origine="sources/tests/b.md"),
-                self._source_entry(identifiant_suffix="a", origine="sources/tests/a.md"),
+                self._source_entry(signature_suffix="b", origine="sources/tests/b.md"),
+                self._source_entry(signature_suffix="a", origine="sources/tests/a.md"),
             ],
         )
 
         sources = DB.list_sources(self.con)
-        self.assertEqual([s["identifiant_technique"] for s in sources], ["tech-a", "tech-b"])
+        self.assertEqual([s["signature"] for s in sources], ["tech-a", "tech-b"])
         self.assertEqual(self.con.execute("SELECT COUNT(*) FROM source_document").fetchone()[0], 2)
 
         stats = DB.get_stats(self.con)
         self.assertEqual(stats["sources"], 2)
         self.assertEqual(stats["source_documents"], 2)
+
+    def test_upsert_source_defaults_ocr_status_by_extension_and_preserves_existing_value(self) -> None:
+        pdf_entry = self._source_entry(signature_suffix="pdf", origine="sources/tests/source.pdf")
+        created = DB.upsert_source(self.con, pdf_entry)
+        self.assertEqual(created["action"], "created")
+
+        stored_status = self.con.execute(
+            "SELECT ocr_status FROM source WHERE signature = ?",
+            (pdf_entry["signature"],),
+        ).fetchone()[0]
+        self.assertEqual(stored_status, "P")
+
+        DB.update_source_ocr_status(self.con, created["source_id"], "D")
+        pdf_entry_updated = dict(pdf_entry)
+        pdf_entry_updated["titre"] = "Titre mis à jour"
+        pdf_entry_updated["ocr_status"] = "P"
+        DB.upsert_source(self.con, pdf_entry_updated)
+
+        preserved_status = self.con.execute(
+            "SELECT ocr_status FROM source WHERE id = ?",
+            (created["source_id"],),
+        ).fetchone()[0]
+        self.assertEqual(preserved_status, "D")
+
+        md_entry = self._source_entry(signature_suffix="md", origine="sources/tests/source.md")
+        DB.upsert_source(self.con, md_entry)
+        md_status = self.con.execute(
+            "SELECT ocr_status FROM source WHERE signature = ?",
+            (md_entry["signature"],),
+        ).fetchone()[0]
+        self.assertEqual(md_status, "N")
+
+    def test_replace_sources_keeps_existing_ocr_status(self) -> None:
+        entry = self._source_entry(signature_suffix="keep", origine="sources/tests/keep.pdf")
+        created = DB.upsert_source(self.con, entry)
+        DB.update_source_ocr_status(self.con, created["source_id"], "T")
+
+        DB.replace_sources(self.con, [entry])
+
+        status = self.con.execute(
+            "SELECT ocr_status FROM source WHERE signature = ?",
+            (entry["signature"],),
+        ).fetchone()[0]
+        self.assertEqual(status, "T")
 
 
 if __name__ == "__main__":

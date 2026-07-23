@@ -76,7 +76,7 @@ python -u ".agents/skills/fetch-generic-url/scripts/fetch_generic_url.py" --url 
 
 ### 2. Si URL est un document direct
 - Télécharge le fichier binaire vers `sources/generic-urls/`
-- Génère un `identifiant_technique` (MD5 du contenu du fichier)
+- Génère un `signature` (MD5 du contenu du fichier)
 - Enregistre dans `source_document` avec metadata
 
 ### 3. Si URL est une webpage ET `document_type` fourni
@@ -100,7 +100,7 @@ python -u ".agents/skills/fetch-generic-url/scripts/fetch_generic_url.py" --url 
 ## Notes
 
 - Utilise Playwright en mode CDP (Chrome DevTools Protocol) pour les webpages interactives
-- Respecte les conventions du projet: MD5 pour `identifiant_technique`, accents français
+- Respecte les conventions du projet: MD5 pour `signature`, accents français
 - Front matter YAML obligatoire pour tous les Markdown générés (incluant `date_publication` et `date_consultation`)
 - Suit automatiquement max 3 redirects HTTP (configurable via `--max-redirects`)
 - Les images sont liées aux documents parents via `parent_doc_id` dans la DB

@@ -1,5 +1,7 @@
 # Coûts des skills et agents de `corpus-lens` (en crédits IA)
 
+Avec l'avènement de l'IA générative, les performances se mesurent en tokens plutôt qu'en millisecondes. Là où auparavant personne ne s'émouvait d'une requête lente mais sans impact visible sur les coûts, la surconsommation de token devient rapidement une question d'argent. Raison pour laquelle `corpus-lens` a été conçu pour minimiser la consommation de tokens et donc le coût d'utilisation.
+
 Coût d'exécution des skills en IA credits (1 IA credit = environ 0.01 USD), lorsque le skill est invoqué dans le chat de GitHub Copilot avec la commande `/skill:<nom_du_skill> ...`.
 
 Il n'y a pas de coût en crédits IA si le skill est invoqué directement depuis la ligne de commande via son script. Par exemple, on peut lancer l'indexation de sources avec la commande suivante:

@@ -614,9 +614,7 @@ def register_output_in_db(
             titre=title,
             url=source_url,
             auteurs=["Dodis"],
-            pertinence=0.65,
             type_source="secondaire",
-            lisible=True,
             nombre_pages=1,
             categorie="autre",
             ner_status=1

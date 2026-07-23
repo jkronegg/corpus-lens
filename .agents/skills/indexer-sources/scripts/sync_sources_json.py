@@ -1,4 +1,5 @@
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -7,7 +8,7 @@ import sys
 import unicodedata
 from datetime import datetime
 from pathlib import Path
-from typing import TextIO, Optional
+from typing import TextIO
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -19,15 +20,19 @@ NAMED_ENTITIES_DB_SCRIPTS_DIR = (
 if str(NAMED_ENTITIES_DB_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(NAMED_ENTITIES_DB_SCRIPTS_DIR))
 
-from db import (
-    get_connection as get_named_entities_connection,
-    list_source_documents as list_indexed_source_documents,
-    list_sources as list_indexed_sources,
-    replace_sources as replace_indexed_sources,
-    upsert_source,
-)
+_DB_MODULE_PATH = NAMED_ENTITIES_DB_SCRIPTS_DIR / "db.py"
+_DB_SPEC = importlib.util.spec_from_file_location("named_entities_db_sync_sources", _DB_MODULE_PATH)
+if _DB_SPEC is None or _DB_SPEC.loader is None:
+    raise RuntimeError(f"Impossible de charger le module DB: {_DB_MODULE_PATH}")
+_DB_MODULE = importlib.util.module_from_spec(_DB_SPEC)
+_DB_SPEC.loader.exec_module(_DB_MODULE)
 
-import importlib.util
+get_named_entities_connection = _DB_MODULE.get_connection
+list_indexed_source_documents = _DB_MODULE.list_source_documents
+list_indexed_sources = _DB_MODULE.list_sources
+replace_indexed_sources = _DB_MODULE.replace_sources
+get_source_with_documents_by_path = _DB_MODULE.get_source_with_documents_by_path
+upsert_source = _DB_MODULE.upsert_source
 
 NER_EXTRACT_SCRIPT = (
     ROOT
@@ -516,7 +521,7 @@ def detect_date_publication_from_md(md_path: Path) -> str:
 
     # Fenêtres proches des mentions d'auteur/rédaction (souvent en tête/pied du document).
     nearby_author_windows = re.findall(
-        r"(?is)(?:autrice\/auteur|autrice|auteur|autor|rédaction|redaction|publié\s+le|version\s+du).{0,120}",
+        r"(?is)(?:autrice/auteur|autrice|auteur|autor|rédaction|redaction|publié\s+le|version\s+du).{0,120}",
         first_page + "\n" + last_page,
     )
     for window in nearby_author_windows:
@@ -761,7 +766,7 @@ def _extract_markdown_asset_refs(content: str) -> list[str]:
     refs: list[str] = []
 
     # Markdown image syntax: ![alt](path "title")
-    for match in re.finditer(r"!\[[^\]]*\]\(([^)]+)\)", content):
+    for match in re.finditer(r"!\[[^]]*]\(([^)]+)\)", content):
         raw = match.group(1).strip()
         if not raw:
             continue
@@ -1175,71 +1180,6 @@ def detect_issn_from_md(md_path: Path) -> str:
     return ""
 
 
-def compute_pertinence(
-    type_source: str,
-    categorie: str,
-    date_publication: str,
-    periodes: list[str],
-    is_readable: bool,
-    has_authors: bool,
-    period_interest_start_year: int,
-    period_interest_end_year: int,
-) -> float:
-    # Base neutre
-    score = 0.35
-
-    if not is_readable:
-        return 0.0
-
-    # Type de source
-    if type_source == "primaire":
-        score += 0.30
-    else:
-        score += 0.10
-
-    # Catégorie documentaire
-    if categorie == "document officiel":
-        score += 0.20
-    elif categorie == "discours":
-        score += 0.12
-    elif categorie == "rapport":
-        score += 0.08
-    elif categorie == "presse":
-        score += 0.05
-
-    # Bonus si auteurs identifiés
-    if has_authors:
-        score += 0.05
-
-    start_bound = min(period_interest_start_year, period_interest_end_year)
-    end_bound = max(period_interest_start_year, period_interest_end_year)
-
-    # Fiabilité temporelle (date explicite)
-    if re.match(r"^\d{4}-\d{2}-\d{2}$", str(date_publication)) and date_publication != "0000-00-00":
-        score += 0.08
-        try:
-            year = int(date_publication[:4])
-            # Légère prime si la date est dans la période d'étude.
-            if start_bound <= year <= end_bound:
-                score += 0.07
-        except ValueError:
-            pass
-
-    # Prime de couverture de la période cible
-    for period in periodes:
-        m = re.match(r"^(\d{4})-(\d{4})$", period)
-        if not m:
-            continue
-        p_start = int(m.group(1))
-        p_end = int(m.group(2))
-        if not (p_end < start_bound or p_start > end_bound):
-            score += 0.05
-            break
-        score += 0.05
-
-    # Clamp + arrondi déterministe
-    score = min(1.0, max(0.0, score))
-    return round(score, 2)
 
 
 def detect_categorie_from_md(md_path: Path, title: str) -> str:
@@ -1461,7 +1401,9 @@ def normalize_entry(
     source_json_metadata: dict | None = None,
     period_interest_start_year: int = 1918,
     period_interest_end_year: int = 1939,
+    precomputed_signature: str | None = None,
 ) -> dict:
+    entry = dict(entry or {})
     md_metadata = md_metadata or {}
     source_json_metadata = source_json_metadata or {}
 
@@ -1486,23 +1428,30 @@ def normalize_entry(
     title = str(md_metadata.get("titre") or md_metadata.get("title") or entry.get("titre") or source_path.stem.replace("_", " ")).strip()
 
     # Auteurs: combiner front matter, entrée existante et détection dans le document
-    authors_from_entry = entry.get("auteurs") if isinstance(entry.get("auteurs"), list) else []
-    authors_from_md = []
+    raw_authors_from_entry = entry.get("auteurs")
+    authors_from_entry: list[str] = []
+    if isinstance(raw_authors_from_entry, list):
+        for item in raw_authors_from_entry:
+            authors_from_entry.append(str(item))
+    authors_from_md: list[str] = []
     # Front matter peut avoir 'auteur' ou 'auteurs'
     if "auteur" in md_metadata:
         val = md_metadata["auteur"]
         if isinstance(val, list):
-            authors_from_md = val
+            authors_from_md = [str(item) for item in val]
         elif isinstance(val, str):
             authors_from_md = [val]
     elif "auteurs" in md_metadata:
         val = md_metadata["auteurs"]
         if isinstance(val, list):
-            authors_from_md = val
+            authors_from_md = [str(item) for item in val]
         elif isinstance(val, str):
             authors_from_md = [val]
-    
-    authors = [a.strip() for a in (authors_from_md + authors_from_entry) if isinstance(a, str) and a.strip()]
+
+    combined_authors: list[str] = []
+    combined_authors.extend(authors_from_md)
+    combined_authors.extend(authors_from_entry)
+    authors = [a.strip() for a in combined_authors if isinstance(a, str) and a.strip()]
     authors = sanitize_author_candidates(authors, known_authors)
     
     # Détection dans le document: uniquement si on n'a pas d'auteurs du front matter
@@ -1534,16 +1483,6 @@ def normalize_entry(
         None,
         interest_start_year=period_interest_start_year,
         interest_end_year=period_interest_end_year,
-    )
-    pertinence = compute_pertinence(
-        type_source=type_source,
-        categorie=categorie,
-        date_publication=date_publication,
-        periodes=periodes,
-        is_readable=is_readable,
-        has_authors=bool(authors),
-        period_interest_start_year=period_interest_start_year,
-        period_interest_end_year=period_interest_end_year,
     )
 
     pages_value = entry.get("nombre_pages", page_count)
@@ -1577,7 +1516,7 @@ def normalize_entry(
     url_value = str(md_metadata.get("url") or entry.get("URL") or source_json_metadata.get("url") or "").strip()
 
     return {
-        "identifiant_technique": md5_file(source_path),
+        "signature": precomputed_signature if precomputed_signature else md5_file(source_path),
         "identifiant_source_base": identifiant_source_base,
         "identifiant_source": identifiant_source_base,
         "titre": title,
@@ -1591,9 +1530,7 @@ def normalize_entry(
         "DOI": doi_value,
         "URL": url_value,
         "langues": langues_value,
-        "pertinence": pertinence,
         "type_source": type_source,
-        "lisible": bool(entry.get("lisible", is_readable)),
         "nombre_pages": pages_value,
         "categorie": categorie,
         "extrait_brut": str(entry.get("extrait_brut") or excerpt),
@@ -1607,7 +1544,7 @@ def assign_identifiant_source(entries: list[dict]) -> None:
         by_base.setdefault(entry["identifiant_source_base"], []).append(entry)
 
     for base_id, group in by_base.items():
-        group.sort(key=lambda x: x["identifiant_technique"])
+        group.sort(key=lambda x: x["signature"])
         if len(group) == 1:
             group[0]["identifiant_source"] = base_id
             continue
@@ -1809,6 +1746,16 @@ def run_named_entities_extraction_batch_from_db(con) -> None:
             continue
         if not doc_path.exists():
             continue
+
+        parent_doc_id = document.get("parent_doc_id")
+        if parent_doc_id is not None:
+            source_row = get_source_with_documents_by_path(con, str(document.get("path") or ""))
+            if source_row is None:
+                continue
+            parent_path = str(source_row.get("source_origine") or source_row.get("origine") or "").strip()
+            if parent_path.lower().endswith(".pdf") and str(source_row.get("ocr_status") or "") != "D":
+                continue
+
         doc_paths.append(doc_path)
 
     total = len(doc_paths)
@@ -1821,6 +1768,106 @@ def run_named_entities_extraction_batch_from_db(con) -> None:
         label = doc_path.name[:24]
         run_named_entities_extraction(doc_path, quiet=True, log_file=NER_GLOBAL_LOG_FILE, reanalyse=False)
         _print_progress_bar(idx, total, label=label)
+
+
+def _delete_orphaned_entities_and_mentions(con, source_document_id: int) -> None:
+    """Supprime en cascade : mentions du document, puis entités orphelines."""
+    # 1. Récupérer les IDs des mentions associées à ce document
+    mention_rows = con.execute(
+        "SELECT id FROM mention WHERE source_document_id = ?",
+        (source_document_id,),
+    ).fetchall()
+    mention_ids = [row["id"] for row in mention_rows]
+
+    # 2. Supprimer les mentions
+    if mention_ids:
+        placeholders = ",".join("?" * len(mention_ids))
+        con.execute(f"DELETE FROM mention WHERE id IN ({placeholders})", mention_ids)
+
+    # 3. Récupérer tous les person_id et named_entity_id qui pourraient être orphelins
+    all_person_ids = con.execute("SELECT DISTINCT person_id FROM mention WHERE person_id IS NOT NULL").fetchall()
+    all_named_entity_ids = con.execute("SELECT DISTINCT named_entity_id FROM mention WHERE named_entity_id IS NOT NULL").fetchall()
+
+    # 4. Supprimer les person qui n'ont aucune mention
+    for row in all_person_ids:
+        person_id = row["person_id"]
+        if person_id is None:
+            continue
+        mention_count = con.execute(
+            "SELECT COUNT(*) as cnt FROM mention WHERE person_id = ?",
+            (person_id,),
+        ).fetchone()["cnt"]
+        if mention_count == 0:
+            con.execute("DELETE FROM person WHERE id = ?", (person_id,))
+
+    # 5. Supprimer les named_entity qui n'ont aucune mention
+    for row in all_named_entity_ids:
+        named_entity_id = row["named_entity_id"]
+        if named_entity_id is None:
+            continue
+        mention_count = con.execute(
+            "SELECT COUNT(*) as cnt FROM mention WHERE named_entity_id = ?",
+            (named_entity_id,),
+        ).fetchone()["cnt"]
+        if mention_count == 0:
+            con.execute("DELETE FROM named_entity WHERE id = ?", (named_entity_id,))
+
+
+def _sync_deleted_files(con) -> dict[str, int]:
+    """Synchronise la suppression de fichiers : détecte les documents dont le fichier n'existe plus.
+
+    Pour chaque fichier disparu:
+    1. Calcule la signature du document
+    2. Recherche le document dans la table `source_document` via la colonne `signature`
+    3. Si trouvé:
+       - Supprime toutes les mentions liées (table `mention`, colonne `source_document_id`)
+       - Supprime toutes les `person` et `named_entity` sans mentions
+       - Supprime le document dans `source_document`
+       - Supprime le document dans `source` s'il est présent
+    """
+    deleted_count = 0
+    skipped_count = 0
+
+    # Récupérer tous les documents actuellement dans source_document
+    all_documents = con.execute(
+        "SELECT id, path, signature FROM source_document ORDER BY path"
+    ).fetchall()
+
+    for document in all_documents:
+        doc_id = document["id"]
+        doc_path_rel = str(document["path"] or "").strip().replace("\\", "/")
+        doc_signature = str(document["signature"] or "").strip()
+
+        if not doc_path_rel:
+            skipped_count += 1
+            continue
+
+        # Construire le chemin absolu du fichier
+        doc_abs = ROOT / doc_path_rel
+
+        # Vérifier si le fichier existe
+        if doc_abs.exists():
+            skipped_count += 1
+            continue
+
+        # Le fichier n'existe plus: appliquer le traitement de suppression
+        print(f"[DELETE] Fichier supprimé détecté: {doc_path_rel}")
+
+        # Supprimer les mentions et les entités orphelines
+        _delete_orphaned_entities_and_mentions(con, doc_id)
+
+        # Supprimer le document dans source_document
+        con.execute("DELETE FROM source_document WHERE id = ?", (doc_id,))
+        deleted_count += 1
+
+        # Supprimer le document dans `source` s'il est présent
+        con.execute("DELETE FROM source WHERE origine = ?", (doc_path_rel,))
+
+    con.commit()
+    return {
+        "deleted": deleted_count,
+        "skipped": skipped_count,
+    }
 
 
 def sync_pdf_markdown_documents(con, source_entries: list[dict]) -> dict[str, int]:
@@ -1866,7 +1913,6 @@ def sync_pdf_markdown_documents(con, source_entries: list[dict]) -> dict[str, in
             reason = result.get("reason")
             if reason:
                 print(f"[WARN] document dérivé non synchronisé ({md_rel}): {reason}")
-
     return {
         "created": created,
         "updated": updated,
@@ -1894,9 +1940,6 @@ def main() -> None:
             print(f"[INFO] aucun répertoire sources détecté ({SOURCES_DIR}); rien à indexer.")
             return
 
-        if not run_pdf_extraction_batch():
-            return
-
         con = get_named_entities_connection()
         current = list_indexed_sources(con)
         known_authors = load_known_authors(AUTHORS_PATH)
@@ -1909,6 +1952,33 @@ def main() -> None:
                 by_origin[origin] = item
                 key = source_key_from_path(ROOT / origin)
                 by_source_key[key] = item
+
+        # Index par signature pour la détection des renommages/déplacements dans `source`
+        by_signature_source: dict[str, dict] = {}
+        for item in current:
+            sig = item.get("signature")
+            if isinstance(sig, str) and sig:
+                by_signature_source[sig] = item
+
+        # Index par signature pour la détection des renommages/déplacements dans `source_document`
+        by_signature_doc: dict[str, dict] = {}
+        _doc_rows = con.execute(
+            "SELECT id, path, file_name, signature FROM source_document "
+            "WHERE signature IS NOT NULL AND trim(signature) != '' ORDER BY path"
+        ).fetchall()
+        for _row in _doc_rows:
+            _sig = str(_row["signature"] or "").strip()
+            if _sig:
+                by_signature_doc[_sig] = dict(_row)
+
+        # Synchroniser la suppression/renommage de fichiers EN PREMIER
+        # Cela évite les conversions PDF vers Markdown inutiles pour les fichiers supprimés
+        deletion_result = _sync_deleted_files(con)
+        if deletion_result['deleted'] > 0:
+            print(
+                f"ok: suppression de {deletion_result['deleted']} document(s) supprimé(s) "
+                f"({deletion_result['skipped']} document(s) conservé(s))"
+            )
 
         all_files = sorted(p for p in SOURCES_DIR.rglob("*") if p.is_file())
         md_paths = [p for p in all_files if p.suffix.lower() == ".md"]
@@ -1938,7 +2008,7 @@ def main() -> None:
                 if isinstance(source_value, str) and source_value.strip():
                     continue
 
-            analysis_md = source_path if source_path.suffix.lower() == ".md" else source_path.with_suffix(".md")
+            analysis_md = Path(source_path) if source_path.suffix.lower() == ".md" else Path(source_path).with_suffix(".md")
 
             # Contrainte obligatoire: sections `Page X` sur les Markdown analytiques.
             if analysis_md.exists() and analysis_md.suffix.lower() == ".md":
@@ -1954,7 +2024,32 @@ def main() -> None:
             langues_value = markdown_language_distribution(active_md) if source_path.suffix.lower() == ".md" else None
             rel_source = to_rel(source_path)
             source_key = source_key_from_path(source_path)
-            source_entry = by_origin.get(rel_source, by_source_key.get(source_key, {}))
+
+            # Étape 1: calculer la signature du fichier (base de la détection de renommage/déplacement)
+            file_sig = md5_file(source_path)
+
+            # Lookup prioritaire par chemin (comportement existant)
+            source_entry = dict(by_origin.get(rel_source) or by_source_key.get(source_key) or {})
+
+            if not source_entry:
+                # Étapes 2-5: recherche dans la table `source` par signature
+                sig_source_match = by_signature_source.get(file_sig)
+                if sig_source_match:
+                    old_origine = str(sig_source_match.get("origine") or "")
+                    if old_origine and old_origine != rel_source:
+                        # Étape 5: fichier renommé/déplacé — l'`origine` sera corrigée via le replace
+                        print(f"[RENAME] déplacement détecté (source): {old_origine!r} → {rel_source!r}")
+                    # Étape 4 ou 5: réutiliser les métadonnées existantes (préserve ocr_status, etc.)
+                    source_entry = dict(sig_source_match)
+                else:
+                    # Étapes 6-9: recherche dans la table `source_document` par signature
+                    sig_doc_match = by_signature_doc.get(file_sig)
+                    if sig_doc_match:
+                        old_path = str(sig_doc_match.get("path") or "")
+                        if old_path and old_path != rel_source:
+                            # Étape 9: fichier renommé/déplacé — le `path`/`file_name` sera corrigé via le replace
+                            print(f"[RENAME] déplacement détecté (source_document): {old_path!r} → {rel_source!r}")
+                    # Étape 10: nouveau fichier ou document déplacé → source_entry reste {}, traitement normal
 
             # Charger les métadonnées du front matter Markdown
             md_metadata = _parse_front_matter_fields(active_md)
@@ -1975,14 +2070,16 @@ def main() -> None:
                 source_json_metadata=source_json_metadata,
                 period_interest_start_year=INTEREST_PERIOD_START_YEAR,
                 period_interest_end_year=INTEREST_PERIOD_END_YEAR,
+                precomputed_signature=file_sig,
             )
             entry["ner_status"] = 1 if source_path.suffix.lower() == ".md" else 0
+            entry["ocr_status"] = source_entry.get("ocr_status") if isinstance(source_entry, dict) else None
 
             final_entries.append(entry)
 
         assign_identifiant_source(final_entries)
         clean_internal_keys(final_entries)
-        final_entries.sort(key=lambda x: x["identifiant_technique"])
+        final_entries.sort(key=lambda x: x["signature"])
 
         if invalid_page_sections:
             invalid_unique = sorted(set(invalid_page_sections))
@@ -1997,6 +2094,11 @@ def main() -> None:
             f"ok: {sync_result['sources_count']} sources synchronisées dans SQLite "
             f"({sync_result['documents_count']} documents liés)"
         )
+
+        # Extraction batch des PDFs: après la synchronisation SQLite, les PDF disposent d'un ocr_status.
+        # Le batch OCR sélectionne les originaux P/F/T depuis la base.
+        if not run_pdf_extraction_batch():
+            return
 
         pdf_md_sync = sync_pdf_markdown_documents(con, final_entries)
         print(

@@ -16,6 +16,9 @@ import sqlite3
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+import db as _db
+
 
 # ---------------------------------------------------------------------------
 # Chemins par défaut
@@ -37,10 +40,8 @@ def init_db(db_path: Path, force: bool = False) -> None:
         else:
             print(f"[init_db] La base existe déjà : {db_path}")
             print("[init_db] Mise à niveau idempotente à partir du schéma versionné...")
-            con = sqlite3.connect(db_path)
+            con = _db.get_connection(db_path)
             try:
-                con.executescript(SCHEMA_FILE.read_text(encoding="utf-8"))
-                con.commit()
                 _verify(con)
             finally:
                 con.close()
@@ -53,7 +54,7 @@ def init_db(db_path: Path, force: bool = False) -> None:
     schema_sql = SCHEMA_FILE.read_text(encoding="utf-8")
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(db_path)
+    con = _db.get_connection(db_path)
     try:
         con.executescript(schema_sql)
         con.commit()

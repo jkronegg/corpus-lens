@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import hashlib
 import sqlite3
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -82,6 +83,15 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
         source_document_columns = {
             row[1] for row in con.execute("PRAGMA table_info(source_document)")
         }
+        if "signature" not in source_document_columns:
+            con.execute(
+                "ALTER TABLE source_document "
+                "ADD COLUMN signature TEXT"
+            )
+            _backfill_source_document_signatures(con)
+            source_document_columns = {
+                row[1] for row in con.execute("PRAGMA table_info(source_document)")
+            }
         if "parent_doc_id" not in source_document_columns:
             con.execute(
                 "ALTER TABLE source_document "
@@ -103,6 +113,7 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
                     parent_doc_id INTEGER
                         REFERENCES source_document(id) ON DELETE SET NULL,
                     path          TEXT    NOT NULL UNIQUE,
+                    signature     TEXT,
                     file_name     TEXT    NOT NULL,
                     relative_path TEXT,
                     author        TEXT    NOT NULL DEFAULT '',
@@ -110,8 +121,8 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
                         CHECK (ner_status IN (0, 1, 2))
                 );
 
-                INSERT INTO source_document_new (id, source_id, parent_doc_id, path, file_name, relative_path, author, ner_status)
-                SELECT id, source_id, parent_doc_id, path, file_name, relative_path, author, ner_status
+                INSERT INTO source_document_new (id, source_id, parent_doc_id, path, signature, file_name, relative_path, author, ner_status)
+                SELECT id, source_id, parent_doc_id, path, signature, file_name, relative_path, author, ner_status
                 FROM source_document;
 
                 DROP TABLE source_document;
@@ -130,27 +141,48 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
                 "ADD COLUMN source_document_id INTEGER REFERENCES source_document(id) ON DELETE CASCADE"
             )
 
+    # Pré-migration critique: sur certaines bases legacy, `source` existe sans
+    # `ocr_status`, et/ou avec l'ancien nom `identifiant_technique` au lieu de
+    # `signature`. Il faut migrer AVANT d'exécuter schema.sql, sinon les index
+    # et vues du schéma peuvent échouer.
+    if "source" in existing_tables:
+        source_columns = {row[1] for row in con.execute("PRAGMA table_info(source)")}
+        if "signature" not in source_columns and "identifiant_technique" in source_columns:
+            con.execute(
+                "ALTER TABLE source RENAME COLUMN identifiant_technique TO signature"
+            )
+            source_columns = {row[1] for row in con.execute("PRAGMA table_info(source)")}
+        if "ocr_status" not in source_columns:
+            con.execute(
+                "ALTER TABLE source "
+                "ADD COLUMN ocr_status TEXT NOT NULL DEFAULT 'N' "
+                "CHECK (ocr_status IN ('P', 'T', 'D', 'F', 'N'))"
+            )
+            con.execute(
+                "UPDATE source "
+                "SET ocr_status = CASE "
+                "WHEN lower(origine) LIKE '%.pdf' THEN 'P' "
+                "WHEN lower(origine) LIKE '%.md' THEN 'N' "
+                "ELSE 'N' END "
+                "WHERE ocr_status IS NULL OR ocr_status = ''"
+            )
+
     schema_sql = DEFAULT_SCHEMA.read_text(encoding="utf-8")
     con.executescript(schema_sql)
 
-    # Migration légère pour bases déjà existantes.
-    source_document_columns = {row[1] for row in con.execute("PRAGMA table_info(source_document)")}
-    if "parent_doc_id" not in source_document_columns:
-        con.execute(
-            "ALTER TABLE source_document "
-            "ADD COLUMN parent_doc_id INTEGER REFERENCES source_document(id) ON DELETE SET NULL"
-        )
-
-    mention_columns = {row[1] for row in con.execute("PRAGMA table_info(mention)")}
-    if "source_document_id" not in mention_columns:
-        con.execute(
-            "ALTER TABLE mention "
-            "ADD COLUMN source_document_id INTEGER REFERENCES source_document(id) ON DELETE CASCADE"
-        )
-
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_source_signature ON source(signature)"
+    )
     con.execute(
         "CREATE INDEX IF NOT EXISTS idx_source_document_parent_doc_id "
         "ON source_document(parent_doc_id)"
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_source_document_signature "
+        "ON source_document(signature)"
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_source_ocr_status ON source(ocr_status)"
     )
     con.commit()
 
@@ -161,6 +193,15 @@ def _normalize_key(key: str) -> str:
 
 def _json_dumps(value: object) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+def _default_ocr_status_for_path(path: str) -> str:
+    lowered = (path or "").strip().lower()
+    if lowered.endswith(".pdf"):
+        return "P"
+    if lowered.endswith(".md"):
+        return "N"
+    return "N"
 
 
 def _md5_file(path: Path) -> str:
@@ -174,17 +215,55 @@ def _md5_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _compute_document_signature_from_repo_path(path: str) -> str | None:
+    normalized = str(path or "").strip().replace("\\", "/")
+    if not normalized:
+        return None
+    absolute_path = _REPO_ROOT / Path(normalized)
+    if not absolute_path.exists() or not absolute_path.is_file():
+        return None
+    return _md5_file(absolute_path)
+
+
+def _backfill_source_document_signatures(con: sqlite3.Connection) -> int:
+    rows = con.execute(
+        """
+        SELECT id, path
+        FROM source_document
+        WHERE signature IS NULL OR trim(signature) = ''
+        ORDER BY id
+        """
+    ).fetchall()
+    updated = 0
+    for row in rows:
+        signature = _compute_document_signature_from_repo_path(row["path"])
+        if not signature:
+            continue
+        con.execute(
+            "UPDATE source_document SET signature = ? WHERE id = ?",
+            (signature, row["id"]),
+        )
+        updated += 1
+    return updated
+
+
 def _to_repo_rel_posix(path: Path | str) -> str:
     return Path(path).resolve().relative_to(_REPO_ROOT).as_posix()
 
 
 def _normalize_source_entry(entry: dict) -> dict:
-    auteurs = entry.get("auteurs") if isinstance(entry.get("auteurs"), list) else []
-    periodes = entry.get("periodes") if isinstance(entry.get("periodes"), list) else []
-    origin_or_path = str(entry.get("path") or entry.get("origine") or "").strip().replace("\\", "/")
-    parent_path = str(entry.get("parent_path") or "").strip().replace("\\", "/")
-    file_name = str(entry.get("file_name") or "").strip() or Path(origin_or_path).name
-    relative_path = str(entry.get("relative_path") or "").strip().replace("\\", "/")
+    auteurs = list(entry.get("auteurs") or []) if isinstance(entry.get("auteurs"), list) else []
+    periodes = list(entry.get("periodes") or []) if isinstance(entry.get("periodes"), list) else []
+    clean_auteurs = [str(a).strip() for a in auteurs if str(a).strip()]
+    clean_periodes = [str(p).strip() for p in periodes if str(p).strip()]
+    raw_origin = entry.get("path") or entry.get("origine") or ""
+    raw_parent = entry.get("parent_path") or ""
+    raw_file_name = entry.get("file_name") or ""
+    raw_relative_path = entry.get("relative_path") or ""
+    origin_or_path = str(raw_origin).strip().replace("\\", "/")
+    parent_path = str(raw_parent).strip().replace("\\", "/")
+    file_name = str(raw_file_name).strip() or Path(origin_or_path).name
+    relative_path = str(raw_relative_path).strip().replace("\\", "/")
     if not relative_path:
         relative_path = "." if not parent_path else file_name
     raw_ner_status = entry.get("ner_status")
@@ -192,27 +271,34 @@ def _normalize_source_entry(entry: dict) -> dict:
     if raw_ner_status is None:
         ner_status = None
     else:
-        ner_status = int(raw_ner_status)
+        ner_status = int(str(raw_ner_status).strip())
         if ner_status not in {0, 1, 2}:
             raise ValueError("ner_status doit être 0, 1, 2 ou None")
 
+    raw_ocr_status = entry.get("ocr_status")
+    if raw_ocr_status is None:
+        ocr_status = None
+    else:
+        ocr_status = str(raw_ocr_status).strip().upper()
+        if ocr_status not in {"P", "T", "D", "F", "N"}:
+            raise ValueError("ocr_status doit être P, T, D, F, N ou None")
+
     return {
-        "identifiant_technique": str(entry.get("identifiant_technique") or "").strip(),
+        "signature": str(entry.get("signature") or entry.get("identifiant_technique") or "").strip(),
+        "document_signature": str(entry.get("document_signature") or entry.get("source_document_signature") or "").strip(),
         "identifiant_source": str(entry.get("identifiant_source") or "").strip(),
         "titre": str(entry.get("titre") or "").strip(),
         "date_publication": str(entry.get("date_publication") or "0000-00-00").strip() or "0000-00-00",
         "date_consultation": str(entry.get("date_consultation") or "0000-00-00").strip() or "0000-00-00",
         "origine": origin_or_path,
-        "auteurs": [str(a).strip() for a in auteurs if str(a).strip()],
-        "periodes": [str(p).strip() for p in periodes if str(p).strip()],
+        "auteurs": clean_auteurs,
+        "periodes": clean_periodes,
         "ISBN": str(entry.get("ISBN") or "").strip(),
         "ISSN": str(entry.get("ISSN") or "").strip(),
         "DOI": str(entry.get("DOI") or "").strip(),
         "URL": str(entry.get("URL") or entry.get("url") or "").strip(),
         "langues": entry.get("langues"),
-        "pertinence": float(entry.get("pertinence") or 0.0),
         "type_source": str(entry.get("type_source") or "secondaire").strip() or "secondaire",
-        "lisible": bool(entry.get("lisible", False)),
         "nombre_pages": int(entry.get("nombre_pages", -1) if entry.get("nombre_pages") is not None else -1),
         "categorie": str(entry.get("categorie") or "autre").strip() or "autre",
         "extrait_brut": str(entry.get("extrait_brut") or ""),
@@ -223,26 +309,28 @@ def _normalize_source_entry(entry: dict) -> dict:
         "relative_path": relative_path,
         "author": str(entry.get("author") or "").strip(),
         "ner_status": ner_status,
+        "ocr_status": ocr_status,
     }
 
 
 def list_sources(
     con: sqlite3.Connection,
     limit: Optional[int] = None,
-    identifiant_technique: Optional[str] = None,
+    signature: Optional[str] = None,
     url: Optional[str] = None,
     origine: Optional[str] = None,
 ) -> list[dict]:
-    """Liste les sources indexées dans SQLite, triées par identifiant_technique.
+    """Liste les sources indexées dans SQLite, triées par signature.
 
     Les filtres sont cumulables.
     """
     conditions: list[str] = []
     params: list[object] = []
 
-    if identifiant_technique:
-        conditions.append("identifiant_technique = ?")
-        params.append(identifiant_technique.strip())
+    signature_filter = signature
+    if signature_filter:
+        conditions.append("signature = ?")
+        params.append(signature_filter.strip())
 
     if url:
         candidate = url.strip()
@@ -258,7 +346,7 @@ def list_sources(
             params.append(f"%{candidate}%")
 
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-    sql = f"SELECT * FROM source {where_clause} ORDER BY identifiant_technique"
+    sql = f"SELECT * FROM source {where_clause} ORDER BY signature"
     if limit is not None:
         sql += " LIMIT ?"
         params.append(limit)
@@ -273,7 +361,7 @@ def list_sources(
         item["ISSN"] = item.pop("issn")
         item["DOI"] = item.pop("doi")
         item["URL"] = item.pop("url")
-        item["lisible"] = bool(item["lisible"])
+        item["ocr_status"] = str(item.get("ocr_status") or "N")
         item.pop("id", None)
         item.pop("created_at", None)
         item.pop("updated_at", None)
@@ -337,11 +425,12 @@ def list_source_documents(
             sd.source_id,
             sd.parent_doc_id,
             sd.path,
+            sd.signature,
             sd.file_name,
             sd.relative_path,
             sd.author,
             sd.ner_status,
-            s.identifiant_technique,
+            s.signature,
             s.identifiant_source,
             s.titre
         FROM source_document sd
@@ -355,11 +444,101 @@ def list_source_documents(
     return [dict(r) for r in rows]
 
 
+def list_sources_for_ocr(
+    con: sqlite3.Connection,
+    *,
+    statuses: tuple[str, ...] = ("P", "F", "T"),
+    limit: int | None = None,
+) -> list[dict]:
+    """Liste les sources PDF originales à retraiter selon leur statut OCR."""
+    normalized_statuses = tuple(str(status).strip().upper() for status in statuses if str(status).strip())
+    if not normalized_statuses:
+        return []
+
+    placeholders = ", ".join("?" for _ in normalized_statuses)
+    params: list[object] = list(normalized_statuses)
+    sql = f"""
+        SELECT s.*, sd.id AS document_id, sd.path AS document_path, sd.ner_status
+             , sd.signature AS document_signature
+        FROM source s
+        JOIN source_document sd ON sd.source_id = s.id
+        WHERE sd.parent_doc_id IS NULL
+          AND lower(sd.path) LIKE '%.pdf'
+          AND s.ocr_status IN ({placeholders})
+        ORDER BY sd.path
+    """
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+
+    rows = con.execute(sql, params).fetchall()
+    out: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        item["auteurs"] = json.loads(item.pop("auteurs_json"))
+        item["periodes"] = json.loads(item.pop("periodes_json"))
+        item["ISBN"] = item.pop("isbn")
+        item["ISSN"] = item.pop("issn")
+        item["DOI"] = item.pop("doi")
+        item["URL"] = item.pop("url")
+        out.append(item)
+    return out
+
+
+def get_source_with_documents_by_path(con: sqlite3.Connection, path: str) -> Optional[dict]:
+    """Retourne une source et son document original à partir d'un path repo-relatif."""
+    row = con.execute(
+        """
+        SELECT
+            s.*, sd.id AS document_id, sd.path AS document_path,
+            sd.signature AS document_signature,
+            sd.file_name AS document_file_name, sd.relative_path AS document_relative_path,
+            sd.author AS document_author, sd.ner_status AS document_ner_status,
+            sd.parent_doc_id AS document_parent_doc_id
+        FROM source_document sd
+        JOIN source s ON s.id = sd.source_id
+        WHERE sd.path = ?
+        LIMIT 1
+        """,
+        (str(path or "").strip().replace("\\", "/"),),
+    ).fetchone()
+    if row is None:
+        return None
+
+    item = dict(row)
+    item["auteurs"] = json.loads(item.pop("auteurs_json"))
+    item["periodes"] = json.loads(item.pop("periodes_json"))
+    item["ISBN"] = item.pop("isbn")
+    item["ISSN"] = item.pop("issn")
+    item["DOI"] = item.pop("doi")
+    item["URL"] = item.pop("url")
+    return item
+
+
+def update_source_ocr_status(con: sqlite3.Connection, source_id: int, ocr_status: str) -> dict:
+    """Met à jour atomiquement le statut OCR d'une source."""
+    normalized = str(ocr_status or "").strip().upper()
+    if normalized not in {"P", "T", "D", "F", "N"}:
+        raise ValueError("ocr_status doit être P, T, D, F ou N")
+
+    with con:
+        row = con.execute("SELECT ocr_status FROM source WHERE id = ?", (source_id,)).fetchone()
+        if row is None:
+            return {"action": "error", "reason": f"Source introuvable: {source_id}", "source_id": source_id}
+        con.execute(
+            "UPDATE source SET ocr_status = ?, updated_at = ? WHERE id = ?",
+            (normalized, _now_iso(), source_id),
+        )
+    return {"action": "updated", "source_id": source_id, "ocr_status": normalized}
+
+
 def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
     """Crée/maj une source (parent_path vide) ou un document dérivé (parent_path renseigné)."""
     entry = _normalize_source_entry(source)
     path = entry["path"]
     parent_path = entry["parent_path"]
+    effective_ocr_status = entry["ocr_status"] or _default_ocr_status_for_path(path)
+    document_signature = entry["document_signature"] or _compute_document_signature_from_repo_path(path)
 
     if not path:
         return {"action": "error", "reason": "Champ manquant: path/origine", "source_id": None}
@@ -395,12 +574,13 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
                 cur = con.execute(
                     """
                     INSERT INTO source_document
-                        (source_id, path, file_name, relative_path, author, parent_doc_id, ner_status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                        (source_id, path, signature, file_name, relative_path, author, parent_doc_id, ner_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         source_id,
                         path,
+                        document_signature,
                         entry["file_name"],
                         entry["relative_path"],
                         entry["author"],
@@ -416,6 +596,7 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
                     """
                     UPDATE source_document
                     SET source_id = ?,
+                        signature = ?,
                         file_name = ?,
                         relative_path = ?,
                         author = ?,
@@ -425,6 +606,7 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
                     """,
                     (
                         source_id,
+                        document_signature,
                         entry["file_name"],
                         entry["relative_path"],
                         entry["author"],
@@ -442,7 +624,7 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
         }
 
     required = {
-        "identifiant_technique": entry["identifiant_technique"],
+        "signature": entry["signature"],
         "identifiant_source": entry["identifiant_source"],
         "origine": entry["origine"],
     }
@@ -461,21 +643,21 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
             """
             SELECT id
             FROM source
-            WHERE identifiant_technique = ?
+            WHERE signature = ?
                OR identifiant_source = ?
                OR origine = ?
             ORDER BY CASE
-                WHEN identifiant_technique = ? THEN 0
+                WHEN signature = ? THEN 0
                 WHEN identifiant_source = ? THEN 1
                 ELSE 2
             END
             LIMIT 1
             """,
             (
-                entry["identifiant_technique"],
+                entry["signature"],
                 entry["identifiant_source"],
                 entry["origine"],
-                entry["identifiant_technique"],
+                entry["signature"],
                 entry["identifiant_source"],
             ),
         ).fetchone()
@@ -483,7 +665,7 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
         source_id = existing["id"] if existing is not None else None
 
         for column, value in (
-            ("identifiant_technique", entry["identifiant_technique"]),
+            ("signature", entry["signature"]),
             ("identifiant_source", entry["identifiant_source"]),
             ("origine", entry["origine"]),
         ):
@@ -493,7 +675,7 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
                 con.execute(f"DELETE FROM source WHERE {column} = ? AND id != ?", (value, source_id))
 
         payload = (
-            entry["identifiant_technique"],
+            entry["signature"],
             entry["identifiant_source"],
             entry["titre"],
             entry["date_publication"],
@@ -506,27 +688,26 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
             entry["DOI"],
             entry["URL"],
             entry["langues"],
-            entry["pertinence"],
             entry["type_source"],
-            int(entry["lisible"]),
             entry["nombre_pages"],
             entry["categorie"],
             entry["extrait_brut"],
             entry["resume"],
+            effective_ocr_status,
         )
 
         if source_id is None:
             cur = con.execute(
                 """
                 INSERT INTO source (
-                    identifiant_technique, identifiant_source, titre,
+                    signature, identifiant_source, titre,
                     date_publication, date_consultation, origine,
                     auteurs_json, periodes_json, isbn, issn, doi, url,
-                    langues, pertinence, type_source, lisible, nombre_pages,
-                    categorie, extrait_brut, resume,
+                    langues, type_source, nombre_pages,
+                    categorie, extrait_brut, resume, ocr_status,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 payload + (now, now),
             )
@@ -536,7 +717,7 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
             con.execute(
                 """
                 UPDATE source
-                SET identifiant_technique = ?,
+                SET signature = ?,
                     identifiant_source = ?,
                     titre = ?,
                     date_publication = ?,
@@ -549,17 +730,16 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
                     doi = ?,
                     url = ?,
                     langues = ?,
-                    pertinence = ?,
                     type_source = ?,
-                    lisible = ?,
                     nombre_pages = ?,
                     categorie = ?,
                     extrait_brut = ?,
                     resume = ?,
+                    ocr_status = COALESCE(NULLIF(ocr_status, ''), ?),
                     updated_at = ?
                 WHERE id = ?
                 """,
-                payload + (now, source_id),
+                payload[:-1] + (effective_ocr_status, now, source_id),
             )
             action = "updated"
 
@@ -571,12 +751,13 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
             cur_doc = con.execute(
                 """
                 INSERT INTO source_document
-                    (source_id, path, file_name, relative_path, author, parent_doc_id, ner_status)
-                VALUES (?, ?, ?, ?, ?, NULL, ?)
+                    (source_id, path, signature, file_name, relative_path, author, parent_doc_id, ner_status)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
                 """,
                 (
                     source_id,
                     path,
+                    document_signature,
                     entry["file_name"],
                     entry["relative_path"],
                     entry["author"],
@@ -590,6 +771,7 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
                 """
                 UPDATE source_document
                 SET source_id = ?,
+                    signature = ?,
                     file_name = ?,
                     relative_path = ?,
                     author = ?,
@@ -599,6 +781,7 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
                 """,
                 (
                     source_id,
+                    document_signature,
                     entry["file_name"],
                     entry["relative_path"],
                     entry["author"],
@@ -627,9 +810,7 @@ def register_source_document(
     issn: str = "",
     doi: str = "",
     langues: str | None = None,
-    pertinence: float = 0.5,
     type_source: str = "secondaire",
-    lisible: bool = True,
     nombre_pages: int = -1,
     categorie: str = "autre",
     extrait_brut: str = "",
@@ -660,12 +841,13 @@ def register_source_document(
             "source_id": None,
         }
 
-    identifiant_technique = ""
     if not parent_rel:
-        identifiant_technique = _md5_file(origin)
+        signature = _md5_file(origin)
+    else:
+        signature = ""
 
     entry = {
-        "identifiant_technique": identifiant_technique,
+        "signature": signature,
         "identifiant_source": identifiant_source,
         "titre": titre,
         "date_publication": date_publication,
@@ -678,9 +860,7 @@ def register_source_document(
         "DOI": doi,
         "URL": url,
         "langues": langues,
-        "pertinence": pertinence,
         "type_source": type_source,
-        "lisible": lisible,
         "nombre_pages": nombre_pages,
         "categorie": categorie,
         "extrait_brut": extrait_brut,
@@ -690,6 +870,7 @@ def register_source_document(
         "relative_path": "." if not parent_rel else origin.name,
         "author": author,
         "ner_status": ner_status,
+        "ocr_status": None if parent_rel else _default_ocr_status_for_path(origin_rel),
     }
     return upsert_source(con, entry)
 
@@ -697,24 +878,43 @@ def register_source_document(
 
 def replace_sources(con: sqlite3.Connection, sources: list[dict]) -> dict:
     """Remplace de façon déterministe l'index des sources par les lignes fournies."""
+    warnings.warn(
+        "replace_sources() est deprecated: préférer upsert_source() pour préserver les colonnes OCR et éviter une reconstruction globale opaque.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    existing_statuses_by_key: dict[str, str] = {}
+    for row in con.execute("SELECT signature, identifiant_source, origine, ocr_status FROM source"):
+        status = str(row["ocr_status"] or "").strip().upper() or "N"
+        for key in (row["signature"], row["identifiant_source"], row["origine"]):
+            if key:
+                existing_statuses_by_key[str(key)] = status
+
     normalized = []
     seen_ids: set[str] = set()
     for raw in sources:
         entry = _normalize_source_entry(raw)
-        identifiant_technique = entry["identifiant_technique"]
-        if not identifiant_technique or identifiant_technique in seen_ids:
+        entry["ocr_status"] = (
+            entry["ocr_status"]
+            or existing_statuses_by_key.get(entry["signature"])
+            or existing_statuses_by_key.get(entry["identifiant_source"])
+            or existing_statuses_by_key.get(entry["origine"])
+            or _default_ocr_status_for_path(entry["origine"])
+        )
+        signature = entry["signature"]
+        if not signature or signature in seen_ids:
             continue
-        seen_ids.add(identifiant_technique)
+        seen_ids.add(signature)
         normalized.append(entry)
 
-    normalized.sort(key=lambda item: item["identifiant_technique"])
+    normalized.sort(key=lambda item: item["signature"])
 
     # Garantit l'unicité de identifiant_source de façon déterministe.
     used_identifiant_source: set[str] = set()
     for entry in normalized:
         base = str(entry.get("identifiant_source") or "").strip()
         if not base:
-            base = entry["identifiant_technique"]
+            base = entry["signature"]
 
         candidate = base
         index = 2
@@ -736,17 +936,17 @@ def replace_sources(con: sqlite3.Connection, sources: list[dict]) -> dict:
             con.execute(
                 """
                 INSERT INTO source (
-                    identifiant_technique, identifiant_source, titre,
+                    signature, identifiant_source, titre,
                     date_publication, date_consultation, origine,
                     auteurs_json, periodes_json, isbn, issn, doi, url,
-                    langues, pertinence, type_source, lisible, nombre_pages,
-                    categorie, extrait_brut, resume,
+                    langues, type_source, nombre_pages,
+                    categorie, extrait_brut, resume, ocr_status,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    entry["identifiant_technique"],
+                    entry["signature"],
                     entry["identifiant_source"],
                     entry["titre"],
                     entry["date_publication"],
@@ -759,36 +959,41 @@ def replace_sources(con: sqlite3.Connection, sources: list[dict]) -> dict:
                     entry["DOI"],
                     entry["URL"],
                     entry["langues"],
-                    entry["pertinence"],
                     entry["type_source"],
-                    int(entry["lisible"]),
                     entry["nombre_pages"],
                     entry["categorie"],
                     entry["extrait_brut"],
                     entry["resume"],
+                    entry["ocr_status"],
                     now,
                     now,
                 ),
             )
 
-        tech_to_id = {
-            row["identifiant_technique"]: row["id"]
-            for row in con.execute("SELECT id, identifiant_technique FROM source")
+        signature_to_id = {
+            row["signature"]: row["id"]
+            for row in con.execute("SELECT id, signature FROM source")
         }
 
         documents_count = 0
         for entry in normalized:
-            source_id = tech_to_id[entry["identifiant_technique"]]
+            source_id = signature_to_id[entry["signature"]]
             origin_path = str(entry["origine"]).strip().replace("\\", "/")
             if not origin_path:
                 continue
             con.execute(
                 """
                 INSERT INTO source_document
-                    (source_id, path, file_name, relative_path, author, parent_doc_id, ner_status)
-                VALUES (?, ?, ?, '.', '', NULL, ?)
+                    (source_id, path, signature, file_name, relative_path, author, parent_doc_id, ner_status)
+                VALUES (?, ?, ?, ?, '.', '', NULL, ?)
                 """,
-                (source_id, origin_path, Path(origin_path).name, entry["ner_status"]),
+                (
+                    source_id,
+                    origin_path,
+                    entry.get("document_signature") or _compute_document_signature_from_repo_path(origin_path),
+                    Path(origin_path).name,
+                    entry["ner_status"],
+                ),
             )
             documents_count += 1
 

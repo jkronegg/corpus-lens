@@ -50,7 +50,7 @@ CREATE INDEX IF NOT EXISTS idx_person_display_name ON person(display_name COLLAT
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS source (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
-    identifiant_technique  TEXT    NOT NULL UNIQUE,
+    signature              TEXT    NOT NULL UNIQUE,
     identifiant_source     TEXT    NOT NULL UNIQUE,
     titre                  TEXT    NOT NULL,
     date_publication       TEXT    NOT NULL DEFAULT '0000-00-00',
@@ -65,25 +65,25 @@ CREATE TABLE IF NOT EXISTS source (
     doi                    TEXT    NOT NULL DEFAULT '',
     url                    TEXT    NOT NULL DEFAULT '',
     langues                TEXT,
-    pertinence             REAL    NOT NULL DEFAULT 0.0
-        CHECK (pertinence >= 0.0 AND pertinence <= 1.0),
     type_source            TEXT    NOT NULL DEFAULT 'secondaire'
         CHECK (type_source IN ('primaire', 'secondaire')),
-    lisible                INTEGER NOT NULL DEFAULT 0
-        CHECK (lisible IN (0, 1)),
     nombre_pages           INTEGER NOT NULL DEFAULT -1,
     categorie              TEXT    NOT NULL DEFAULT 'autre',
     extrait_brut           TEXT    NOT NULL DEFAULT '',
     resume                 TEXT    NOT NULL DEFAULT '',
+    ocr_status             TEXT    NOT NULL DEFAULT 'N'
+        CHECK (ocr_status IN ('P', 'T', 'D', 'F', 'N')),
     created_at             TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at             TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
+CREATE INDEX IF NOT EXISTS idx_source_signature          ON source(signature);
 CREATE INDEX IF NOT EXISTS idx_source_identifiant_source ON source(identifiant_source);
 CREATE INDEX IF NOT EXISTS idx_source_origine            ON source(origine);
 CREATE INDEX IF NOT EXISTS idx_source_date_publication   ON source(date_publication);
 CREATE INDEX IF NOT EXISTS idx_source_type_source        ON source(type_source);
 CREATE INDEX IF NOT EXISTS idx_source_categorie          ON source(categorie);
+CREATE INDEX IF NOT EXISTS idx_source_ocr_status         ON source(ocr_status);
 
 -- ------------------------------------------------------------
 -- Table de correspondance entre une source indexée et ses fichiers
@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS source_document (
     parent_doc_id INTEGER
         REFERENCES source_document(id) ON DELETE SET NULL,
     path          TEXT    NOT NULL UNIQUE,
+    signature     TEXT,
     file_name     TEXT    NOT NULL,
     relative_path TEXT,
     author        TEXT    NOT NULL DEFAULT '',
@@ -114,6 +115,7 @@ CREATE TABLE IF NOT EXISTS source_document (
 
 CREATE INDEX IF NOT EXISTS idx_source_document_source_id ON source_document(source_id);
 CREATE INDEX IF NOT EXISTS idx_source_document_path      ON source_document(path);
+CREATE INDEX IF NOT EXISTS idx_source_document_signature ON source_document(signature);
 CREATE INDEX IF NOT EXISTS idx_source_document_parent_doc_id ON source_document(parent_doc_id);
 
 -- ------------------------------------------------------------
@@ -169,8 +171,8 @@ SELECT
     sd.id           AS source_document_id_resolved,
     sd.path         AS source_path,
     s.id            AS source_id,
-    s.identifiant_technique AS source_identifiant_technique,
-    s.identifiant_source    AS source_identifiant_source,
+    s.signature            AS source_signature,
+    s.identifiant_source   AS source_identifiant_source,
     s.titre                AS source_titre,
     s.origine              AS source_origine,
     m.page,

@@ -19,8 +19,9 @@ from urllib.parse import unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
+import pdfplumber
 
-DEFAULT_OUT_DIR = Path("sources/generic-urls")
+DEFAULT_OUT_DIR = Path("sources")
 DEFAULT_MAX_REDIRECTS = 3
 DEFAULT_MAX_DOWNLOAD_ATTEMPTS = 4
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -129,6 +130,38 @@ def slugify(value: str) -> str:
     return slug or "document"
 
 
+def _clean_last_url_segment(segment: str) -> str:
+    """Remove a technical extension from the last URL segment only."""
+    value = unquote(segment or "").strip()
+    if re.search(r"\.[a-z]{1,8}$", value, flags=re.IGNORECASE):
+        cleaned = value.rsplit(".", 1)[0].strip()
+        if cleaned:
+            return cleaned
+    return value
+
+
+def url_storage_subdir(url: str) -> Path:
+    """Build a stable relative storage directory from a source URL."""
+    parsed = urlparse(url)
+    raw_segments = [unquote(segment).strip() for segment in parsed.path.split("/") if segment.strip()]
+
+    if len(raw_segments) > 1 and slugify(raw_segments[0]) in {"f", "fr", "de", "it", "en"}:
+        raw_segments = raw_segments[1:]
+
+    slug_segments: list[str] = []
+    for index, segment in enumerate(raw_segments):
+        normalized = _clean_last_url_segment(segment) if index == len(raw_segments) - 1 else segment
+        slug_segment = slugify(normalized)
+        if slug_segment:
+            slug_segments.append(slug_segment)
+
+    if slug_segments:
+        return Path(*slug_segments)
+
+    hostname = slugify(parsed.hostname or parsed.netloc or "document")
+    return Path(hostname)
+
+
 def page_storage_slug(url: str, title: str) -> str:
     """Build a stable page-specific slug for storing page assets.
 
@@ -152,6 +185,13 @@ def normalize_whitespace(value: str) -> str:
 def today_utc() -> str:
     """Return current UTC date as YYYY-MM-DD."""
     return datetime.now(UTC).strftime("%Y-%m-%d")
+
+
+def publication_date_for_downloaded_file(path: Path) -> Optional[str]:
+    """Return unknown publication date for PDFs; keep current default for other files."""
+    if path.suffix.lower() == ".pdf":
+        return None
+    return today_utc()
 
 
 def _to_iso_date(value: str) -> Optional[str]:
@@ -204,7 +244,7 @@ def extract_document_publication_date(soup: BeautifulSoup) -> Optional[str]:
                 return parsed
 
     for time_tag in soup.find_all("time"):
-        parsed = _to_iso_date(str(time_tag.get("datetime") or time_tag.get_text(separator=" ", strip=True)))
+        parsed = _to_iso_date(str(time_tag.get("datetime") or time_tag.get_text(" ", True)))
         if parsed:
             return parsed
 
@@ -377,7 +417,7 @@ def _process_worklist(
         if not doc_url:
             continue
 
-        if DB_AVAILABLE and db_con and source_exists_by_url and source_exists_by_url(db_con, doc_url):
+        if DB_AVAILABLE and db_con and callable(source_exists_by_url) and source_exists_by_url(db_con, doc_url):
             item["status"] = "skipped"
             item["last_error"] = "already_in_database"
             item["requires_head_check"] = False
@@ -425,17 +465,18 @@ def _process_worklist(
         )
 
         if output_path:
+            pdf_page_count = get_pdf_page_count(output_path)
             item["status"] = "done"
             item["last_error"] = ""
             item["output_file"] = str(output_path)
             downloaded_files.append(str(output_path))
 
-            if DB_AVAILABLE and db_con and upsert_source:
+            if DB_AVAILABLE and db_con and callable(upsert_source):
                 source_entry = {
-                    "identifiant_technique": generate_identifiant_technique(str(output_path)),
+                    "signature": generate_signature(str(output_path)),
                     "identifiant_source": slugify(Path(output_path).stem),
                     "titre": Path(output_path).stem,
-                    "date_publication": today_utc(),
+                    "date_publication": publication_date_for_downloaded_file(output_path),
                     "date_consultation": today_utc(),
                     "origine": doc_url,
                     "url": doc_url,
@@ -446,6 +487,7 @@ def _process_worklist(
                     "file_name": output_path.name,
                     "relative_path": output_path.relative_to(REPO_ROOT / "sources").as_posix() if (REPO_ROOT / "sources") in output_path.parents else output_path.name,
                     "ner_status": 0,
+                    "nombre_pages": pdf_page_count,
                 }
                 result = upsert_source(db_con, source_entry)
                 print(f"[DB] {result.get('action', 'unknown')}: {result.get('source_id')}")
@@ -988,8 +1030,8 @@ def download_image(url: str, images_dir: Path, session: requests.Session) -> Opt
         return None
 
 
-def generate_identifiant_technique(path: str) -> str:
-    """Generate identifiant_technique from file content when possible.
+def generate_signature(path: str) -> str:
+    """Generate signature from file content when possible.
 
     If ``path`` points to an existing file, hash the file bytes so renames
     keep the same technical identifier. Otherwise, fall back to hashing the
@@ -1008,6 +1050,18 @@ def generate_identifiant_technique(path: str) -> str:
     return hashlib.md5(path.encode()).hexdigest()
 
 
+def get_pdf_page_count(path: Path) -> int:
+    """Return number of pages for a PDF file, or -1 when unavailable."""
+    try:
+        if path.suffix.lower() != ".pdf":
+            return -1
+        with pdfplumber.open(path) as pdf:
+            return len(pdf.pages)
+    except Exception as e:
+        print(f"[WARN] Impossible de compter les pages PDF ({path}): {e}")
+        return -1
+
+
 def html_to_markdown(html: str, base_url: str, output_dir: Path, session: requests.Session,
                      follow_links: bool = False, page_assets_dir: Optional[Path] = None) -> tuple[str, Optional[Path], list[Path]]:
     """Convert HTML to Markdown with front matter and download images."""
@@ -1015,8 +1069,8 @@ def html_to_markdown(html: str, base_url: str, output_dir: Path, session: reques
     
     # Extract title and metadata
     title = soup.find("title")
-    page_title = normalize_whitespace(title.get_text(separator=" ", strip=True)) if title else "Untitled"
-    
+    page_title = normalize_whitespace(title.get_text(" ", True)) if title else "Untitled"
+
     # Extract main content
     content_parts = []
     content_parts.append("## Page 1\n")
@@ -1024,7 +1078,7 @@ def html_to_markdown(html: str, base_url: str, output_dir: Path, session: reques
     # Extract text from body
     body = soup.find("body") or soup
     for element in body.find_all(["p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "td", "th"]):
-        text = normalize_whitespace(element.get_text(separator=" ", strip=True))
+        text = normalize_whitespace(element.get_text(" ", True))
         if text:
             if element.name and element.name.startswith("h"):
                 level = int(element.name[1])
@@ -1067,7 +1121,7 @@ date_consultation: {date_consultation}
 transformation_by: "skill fetch-generic-url"
 sources: ["{yaml_escape(url)}"]
 document_type: {document_type}
-identifiant_technique: "{generate_identifiant_technique(url)}"
+signature: "{generate_signature(url)}"
 ---
 
 """
@@ -1078,7 +1132,7 @@ def handle_direct_document(url: str, output_dir: Path, session: requests.Session
     """Handle direct document download."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if DB_AVAILABLE and db_con and source_exists_by_url and source_exists_by_url(db_con, url):
+    if DB_AVAILABLE and db_con and callable(source_exists_by_url) and source_exists_by_url(db_con, url):
         return {
             "success": True,
             "skipped": True,
@@ -1105,13 +1159,14 @@ def handle_direct_document(url: str, output_dir: Path, session: requests.Session
         return {"success": False, "error": "Download failed"}
     
     # Register in database if available
-    if DB_AVAILABLE and db_con and upsert_source:
-        identifiant_technique = generate_identifiant_technique(str(output_path))
+    if DB_AVAILABLE and db_con and callable(upsert_source):
+        signature = generate_signature(str(output_path))
+        pdf_page_count = get_pdf_page_count(output_path)
         source_entry = {
-            "identifiant_technique": identifiant_technique,
+            "signature": signature,
             "identifiant_source": slugify(parsed.path),
             "titre": output_path.stem,
-            "date_publication": today_utc(), # TODO détecter date publication dans le document
+            "date_publication": publication_date_for_downloaded_file(output_path),
             "date_consultation": today_utc(),
             "origine": url,
             "url": url,
@@ -1123,8 +1178,9 @@ def handle_direct_document(url: str, output_dir: Path, session: requests.Session
             "file_name": output_path.name,
             "relative_path": output_path.relative_to(REPO_ROOT / "sources").as_posix() if (REPO_ROOT / "sources") in output_path.parents else output_path.name,
             "ner_status": 0,
+            "nombre_pages": pdf_page_count,
         }
-        
+
         result = upsert_source(db_con, source_entry)
         print(f"[DB] {result.get('action', 'unknown')}: {result.get('source_id')}")
     
@@ -1219,7 +1275,7 @@ def handle_webpage_without_document_type(url: str, output_dir: Path, follow_link
         html = response.text
         soup = BeautifulSoup(html, "html.parser")
         parsed = urlparse(url)
-        page_title = normalize_whitespace((soup.title.get_text(separator=" ", strip=True) if soup.title else "")) or (parsed.path.split("/")[-1] or "webpage")
+        page_title = normalize_whitespace((soup.title.get_text(" ", True) if soup.title else "")) or (parsed.path.split("/")[-1] or "webpage")
         date_publication = extract_document_publication_date(soup)
         page_assets_dir = output_dir / page_storage_slug(url, page_title)
         
@@ -1243,10 +1299,10 @@ def handle_webpage_without_document_type(url: str, output_dir: Path, follow_link
         
         # Register in database if available
         files_registered = []
-        if DB_AVAILABLE and db_con and upsert_source:
-            identifiant_technique = generate_identifiant_technique(str(md_path))
+        if DB_AVAILABLE and db_con and callable(upsert_source):
+            signature = generate_signature(str(md_path))
             source_entry = {
-                "identifiant_technique": identifiant_technique,
+                "signature": signature,
                 "identifiant_source": slugify(md_filename),
                 "titre": page_title,
                 "date_publication": today_utc(),
@@ -1268,7 +1324,7 @@ def handle_webpage_without_document_type(url: str, output_dir: Path, follow_link
             # Register images with parent relationship
             for img_path in image_paths:
                 img_entry = {
-                    "identifiant_technique": generate_identifiant_technique(str(img_path)),
+                    "signature": generate_signature(str(img_path)),
                     "identifiant_source": slugify(img_path.name),
                     "titre": img_path.name,
                     "date_publication": today_utc(),
@@ -1309,7 +1365,7 @@ def main():
     
     # Get database connection if available
     db_con = None
-    if DB_AVAILABLE:
+    if DB_AVAILABLE and callable(get_db_connection):
         try:
             db_con = get_db_connection()
         except Exception as e:
@@ -1317,6 +1373,9 @@ def main():
     
     # Detect content type
     content_type, ext, is_webpage = get_content_type(args.url, session, args.max_redirects)
+
+    if is_webpage and args.document_type:
+        out_dir = out_dir / url_storage_subdir(args.url)
     
     if args.dry_run:
         result = {
@@ -1362,6 +1421,8 @@ def main():
             args.url, out_dir, args.follow_links, session, db_con
         )
     else:
+        if args.document_type:
+            print("[WARN] --document-type ignoré car URL directe ne permettant pas d'avoir des listes de documents.")
         result = handle_direct_document(args.url, out_dir, session, args.max_redirects, db_con)
     
     # Output result
