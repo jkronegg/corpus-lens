@@ -83,6 +83,7 @@ Voir l'analyse détaillée : [`doc/comparatif_chatgpt_corpus-lens/corpus-lens-vs
 - Framework IA agentique (p.ex. GitHub Copilot, OpenAI Codex, Claude Code)
 - Python **3.14 ou superieur**
 - Acces internet (LLM, sources de donnees, telechargement des dependances)
+- Clé d'API Mistral AI pour la conversion PDF vers Markdown (optionnel, mais recommandé pour la qualité de l'extraction); utilisation gratuite jusqu'à une certaine limite
 
 ## Configuration Python (CLI)
 

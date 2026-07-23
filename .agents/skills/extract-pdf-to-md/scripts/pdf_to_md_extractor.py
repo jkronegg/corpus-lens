@@ -1,10 +1,11 @@
 import bisect
 import math
+import os
 import re
 import importlib.util
 import sys
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pdfplumber
@@ -32,6 +33,7 @@ _ROOT = Path(__file__).resolve().parents[4]
 _DETECT_LANG_PATH = _ROOT / ".agents" / "skills" / "translate-markdown" / "scripts" / "detect_markdown_language.py"
 _TRANSLATE_MD_PATH = _ROOT / ".agents" / "skills" / "translate-markdown" / "scripts" / "translate_markdown.py"
 _DB_MODULE_PATH = _ROOT / ".agents" / "skills" / "manage-named-entities-db" / "scripts" / "db.py"
+_MISTRAL_OCR_PATH = _ROOT / ".agents" / "skills" / "extract-pdf-to-md" / "scripts" / "mistral_ocr.py"
 _FR_TRANSLATION_THRESHOLD = 80
 _OCR_ENGINE = None
 _OCR_ENABLED = fitz is not None and RapidOCR is not None
@@ -43,6 +45,16 @@ _OCR_RENDER_ANNOTS = False
 _DB_AVAILABLE = False
 _GET_DB_CONNECTION = None
 _UPSERT_SOURCE = None
+_GET_SOURCE_WITH_DOCUMENTS_BY_PATH = None
+_UPDATE_SOURCE_OCR_STATUS = None
+
+_MISTRAL_AVAILABLE = False
+_MISTRAL_BUILD_MARKDOWN = None
+_MISTRAL_RUN_OCR = None
+_MISTRAL_RUN_OCR_FROM_PDF_BASE64 = None
+_MISTRAL_EXTRACT_IMAGES_FROM_PDF = None
+_MISTRAL_REWRITE_MARKDOWN_IMAGE_LINKS = None
+_MISTRAL_DEFAULT_IMAGES_OUTPUT_DIR = None
 
 _OCR_PRODUCER_HINTS = (
     "adobe psl",
@@ -64,9 +76,36 @@ try:
         _db_spec.loader.exec_module(_db_module)
         _GET_DB_CONNECTION = getattr(_db_module, "get_connection", None)
         _UPSERT_SOURCE = getattr(_db_module, "upsert_source", None)
-        _DB_AVAILABLE = callable(_GET_DB_CONNECTION) and callable(_UPSERT_SOURCE)
+        _GET_SOURCE_WITH_DOCUMENTS_BY_PATH = getattr(_db_module, "get_source_with_documents_by_path", None)
+        _UPDATE_SOURCE_OCR_STATUS = getattr(_db_module, "update_source_ocr_status", None)
+        _DB_AVAILABLE = (
+            callable(_GET_DB_CONNECTION)
+            and callable(_UPSERT_SOURCE)
+            and callable(_GET_SOURCE_WITH_DOCUMENTS_BY_PATH)
+            and callable(_UPDATE_SOURCE_OCR_STATUS)
+        )
 except Exception:
     _DB_AVAILABLE = False
+
+try:
+    _mistral_spec = importlib.util.spec_from_file_location("mistral_ocr_shared", _MISTRAL_OCR_PATH)
+    if _mistral_spec is not None and _mistral_spec.loader is not None:
+        _mistral_module = importlib.util.module_from_spec(_mistral_spec)
+        sys.modules[_mistral_spec.name] = _mistral_module
+        _mistral_spec.loader.exec_module(_mistral_module)
+        _MISTRAL_BUILD_MARKDOWN = getattr(_mistral_module, "_build_markdown", None)
+        _MISTRAL_RUN_OCR = getattr(_mistral_module, "_run_ocr", None)
+        _MISTRAL_RUN_OCR_FROM_PDF_BASE64 = getattr(_mistral_module, "_run_ocr_from_pdf_base64", None)
+        _MISTRAL_EXTRACT_IMAGES_FROM_PDF = getattr(_mistral_module, "_extract_images_from_pdf", None)
+        _MISTRAL_REWRITE_MARKDOWN_IMAGE_LINKS = getattr(_mistral_module, "_rewrite_markdown_image_links", None)
+        _MISTRAL_DEFAULT_IMAGES_OUTPUT_DIR = getattr(_mistral_module, "_default_images_output_dir", None)
+        _MISTRAL_AVAILABLE = (
+            callable(_MISTRAL_BUILD_MARKDOWN)
+            and callable(_MISTRAL_RUN_OCR)
+            and callable(_MISTRAL_RUN_OCR_FROM_PDF_BASE64)
+        )
+except Exception:
+    _MISTRAL_AVAILABLE = False
 
 
 def _get_ocr_engine():
@@ -766,8 +805,6 @@ def _extract_tables_and_chars(page):
         if value is None:
             return ""
         text = str(value).strip()
-        if text.lower() == "nan":
-            return ""
         return text
 
     def _md_cell(value: str) -> str:
@@ -809,37 +846,13 @@ def _extract_tables_and_chars(page):
         header = padded_rows[0]
         data_rows = padded_rows[1:]
 
-        align_right = []
-        for col_idx in range(width):
-            values = []
-            for row in data_rows:
-                for line in row[col_idx]:
-                    if line:
-                        values.append(line)
-            align_right.append(bool(values) and all(_looks_numeric(value) for value in values))
+        def _format_cell(cell: str, _idx: int) -> str:
+            return cell
 
-        col_widths = [0] * width
-        for row in padded_rows:
-            for idx, cell in enumerate(row):
-                for line in cell:
-                    col_widths[idx] = max(col_widths[idx], len(line))
-        col_widths = [max(3, col_widths[0])] + [max(3, w + 2) for w in col_widths[1:]]
+        def _format_header_cell(cell: str, _idx: int) -> str:
+            return cell
 
-        def _format_cell(cell: str, idx: int) -> str:
-            if align_right[idx]:
-                return cell.rjust(col_widths[idx])
-            return cell.ljust(col_widths[idx])
-
-        def _format_header_cell(cell: str, idx: int) -> str:
-            return cell.ljust(col_widths[idx])
-
-        separator = []
-        for idx in range(width):
-            dash_count = max(3, col_widths[idx])
-            if align_right[idx]:
-                separator.append("-" * (dash_count - 1) + ":")
-            else:
-                separator.append(":" + "-" * (dash_count - 1))
+        separator = [":" + "-" * max(3, len(" ".join(cell).strip()) or 3) for cell in header]
 
         lines = [
             # Header rows may span multiple physical lines per cell; render them first.
@@ -937,11 +950,16 @@ def _extract_tables_and_chars(page):
             if df.empty:
                 continue
             df.columns = df.iloc[0]
-            markdown = df.drop(0).to_markdown(index=False)
+            try:
+                markdown = df.drop(0).to_markdown(index=False)
+            except ImportError:
+                markdown = _markdown_table_from_rows(raw_rows)
         else:
             markdown = _markdown_table_from_rows(raw_rows)
             if not markdown:
                 continue
+        if not markdown:
+            continue
         chars.append(
             first_table_char
             | {
@@ -1377,6 +1395,31 @@ def _parse_ddmmyyyy(value: str) -> datetime | None:
         return None
 
 
+def _format_yyyy_mm_dd(date_obj: datetime) -> str:
+    return date_obj.strftime("%Y-%m-%d")
+
+
+def _normalize_publication_date_for_source_db(value: str) -> str:
+    """Normalise la date de publication vers le format DB YYYY-MM-DD."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    parsed = _parse_ddmmyyyy(text)
+    if parsed is not None:
+        return _format_yyyy_mm_dd(parsed)
+
+    iso_match = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", text)
+    if not iso_match:
+        return ""
+
+    try:
+        year, month, day = map(int, iso_match.groups())
+        return _format_yyyy_mm_dd(datetime(year, month, day))
+    except ValueError:
+        return ""
+
+
 def _parse_pdf_creation_date(raw_value: object) -> str:
     """Parse PDF metadata creation date and return dd.MM.yyyy or empty string.
 
@@ -1523,7 +1566,261 @@ def _to_repo_rel(path: Path) -> str:
         return str(resolved)
 
 
-def _register_markdown_source_document(md_path: Path, pdf_path: Path, language_distribution: str) -> None:
+def _get_db_source_context(pdf_path: Path) -> dict | None:
+    if not _DB_AVAILABLE:
+        return None
+    con = None
+    try:
+        con = _GET_DB_CONNECTION()
+        return _GET_SOURCE_WITH_DOCUMENTS_BY_PATH(con, _to_repo_rel(pdf_path))
+    except Exception:
+        return None
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
+
+
+def _set_pdf_ocr_status(pdf_path: Path, status: str) -> None:
+    if not _DB_AVAILABLE:
+        return
+    con = None
+    try:
+        source_context = _get_db_source_context(pdf_path)
+        if not source_context:
+            return
+        con = _GET_DB_CONNECTION()
+        _UPDATE_SOURCE_OCR_STATUS(con, int(source_context["id"]), status)
+    except Exception as exc:
+        print(f"warn: echec mise a jour ocr_status pour {pdf_path}: {exc}", flush=True)
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
+
+
+def _set_pdf_publication_date(pdf_path: Path, date_publication: str) -> None:
+    if not _DB_AVAILABLE:
+        return
+
+    normalized_date = _normalize_publication_date_for_source_db(date_publication)
+    if not normalized_date:
+        return
+
+    con = None
+    try:
+        source_context = _get_db_source_context(pdf_path)
+        if not source_context:
+            return
+
+        con = _GET_DB_CONNECTION()
+        con.execute(
+            "UPDATE source SET date_publication = ?, updated_at = ? WHERE id = ?",
+            (
+                normalized_date,
+                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                int(source_context["id"]),
+            ),
+        )
+        con.commit()
+    except Exception as exc:
+        print(f"warn: echec mise a jour date_publication pour {pdf_path}: {exc}", flush=True)
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
+
+
+def _mistral_markdown_to_page_sections(markdown: str, fallback_total_pages: int) -> tuple[list[str], list[str]]:
+    chunks = re.findall(r"<!--\s*page\s+(\d+)\s*-->\s*(.*?)(?=<!--\s*page\s+\d+\s*-->|\Z)", markdown or "", flags=re.S | re.I)
+    if not chunks:
+        stripped = (markdown or "").strip()
+        if not stripped:
+            return [], []
+        return ["1"], [f"## Page 1\n\n{stripped}"]
+
+    page_labels: list[str] = []
+    sections: list[str] = []
+    for page_idx, raw_body in chunks:
+        label = _normalize_page_label(str(page_idx))
+        body = (raw_body or "").strip()
+        page_labels.append(label)
+        sections.append(f"## Page {label}\n\n{body}")
+
+    if fallback_total_pages > 0 and len(sections) > fallback_total_pages:
+        sections = sections[:fallback_total_pages]
+        page_labels = page_labels[:fallback_total_pages]
+    return page_labels, sections
+
+
+def _rewrite_mistral_markdown_image_links(
+    pdf_path: Path,
+    md_path: Path,
+    markdown: str,
+    ocr_payload: dict,
+) -> tuple[str, int, str | None]:
+    if not markdown.strip() or not ocr_payload:
+        return markdown, 0, None
+
+    helpers_available = (
+        callable(_MISTRAL_EXTRACT_IMAGES_FROM_PDF)
+        and callable(_MISTRAL_REWRITE_MARKDOWN_IMAGE_LINKS)
+    )
+    if not helpers_available:
+        return markdown, 0, "mistral_image_helpers_unavailable"
+
+    output_dir = (
+        _MISTRAL_DEFAULT_IMAGES_OUTPUT_DIR(pdf_path)
+        if callable(_MISTRAL_DEFAULT_IMAGES_OUTPUT_DIR)
+        else pdf_path.with_name(f"{pdf_path.stem}_ocr_images")
+    )
+
+    try:
+        extracted_images = _MISTRAL_EXTRACT_IMAGES_FROM_PDF(
+            pdf_path=pdf_path,
+            ocr_payload=ocr_payload,
+            output_dir=output_dir,
+            render_dpi=200,
+            jpeg_quality=95,
+        )
+        rewritten_markdown = _MISTRAL_REWRITE_MARKDOWN_IMAGE_LINKS(markdown, ocr_payload, md_path, output_dir)
+        return rewritten_markdown, len(extracted_images or []), None
+    except Exception as exc:
+        return markdown, 0, str(exc)
+
+
+def _try_mistral_ocr_markdown(pdf_path: Path, source_url: str | None) -> tuple[str | None, str | None, dict | None, list[str]]:
+    errors: list[str] = []
+    if not _MISTRAL_AVAILABLE:
+        errors.append("mistral_module_unavailable")
+        return None, None, None, errors
+
+    api_key = os.getenv("MISTRAL_API_KEY", "").strip()
+    if not api_key:
+        errors.append("mistral_api_key_missing")
+        return None, None, None, errors
+
+    model = os.getenv("MISTRAL_OCR_MODEL", "mistral-ocr-latest").strip() or "mistral-ocr-latest"
+    include_image_base64 = False
+
+    if source_url:
+        try:
+            payload = _MISTRAL_RUN_OCR(api_key, model, source_url, include_image_base64)
+            markdown = _MISTRAL_BUILD_MARKDOWN(payload)
+            if markdown.strip():
+                return markdown, "url", payload, errors
+            errors.append("mistral_url_empty_markdown")
+        except Exception as exc:
+            errors.append(f"mistral_url_error:{exc}")
+
+    try:
+        payload = _MISTRAL_RUN_OCR_FROM_PDF_BASE64(api_key, model, Path(pdf_path), include_image_base64)
+        markdown = _MISTRAL_BUILD_MARKDOWN(payload)
+        if markdown.strip():
+            return markdown, "base64", payload, errors
+        errors.append("mistral_base64_empty_markdown")
+    except Exception as exc:
+        errors.append(f"mistral_base64_error:{exc}")
+
+    return None, None, None, errors
+
+
+def _local_process_pdf(pdf_path, page_numbers=None):
+    all_text = []
+    page_labels = []
+    ocr_pages = 0
+
+    with pdfplumber.open(pdf_path) as pdf:
+        pdf_metadata = dict(pdf.metadata or {})
+
+        if page_numbers is not None:
+            if isinstance(page_numbers, (str, bytes)):
+                raise TypeError("page_numbers doit être une liste/itérable d'entiers (pages physiques 1-based).")
+
+            pages_with_idx = []
+            for raw_page_num in page_numbers:
+                page_num = int(raw_page_num)
+                page_index = page_num - 1
+                if page_index < 0 or page_index >= len(pdf.pages):
+                    raise ValueError(f"page_numbers contient une page hors limites: {page_num} (1..{len(pdf.pages)})")
+                pages_with_idx.append((page_num, pdf.pages[page_index]))
+        else:
+            pages_with_idx = list(enumerate(pdf.pages, 1))
+
+        force_full_ocr = False
+        old_quality = 0.0
+        new_quality = 0.0
+        try:
+            force_full_ocr, _force_reason, old_quality, new_quality = _assess_ocr_replacement(
+                Path(pdf_path),
+                pages_with_idx,
+                pdf_metadata,
+            )
+        except Exception:
+            force_full_ocr = False
+
+        prev_label = ""
+        for _page_num, page in pages_with_idx:
+            if force_full_ocr:
+                label = _next_page_label(prev_label, str(_page_num)) if prev_label else str(_page_num)
+                label = _normalize_page_label(label)
+                prev_label = label
+                page_labels.append(label)
+
+                page_text = _ocr_text_from_page(Path(pdf_path), _page_num - 1)
+                if page_text:
+                    ocr_pages += 1
+                else:
+                    page_text = ""
+            else:
+                chars = _extract_tables_and_chars(page)
+                table_blocks = [ch["text"] for ch in chars if ch.get("is_markdown_block")]
+                chars = [ch for ch in chars if not ch.get("is_markdown_block")]
+
+                header_text, body_text, footer_text = _extract_text_with_header_footer(chars, page.width, page.height)
+                label = _detect_page_label_from_header_footer(header_text, body_text, footer_text, prev_label)
+                label = _normalize_detected_page_label(prev_label, label)
+                prev_label = label
+                page_labels.append(label)
+
+                if len(header_text) > 0:
+                    header_text = f"\n[header]: # ({header_text})\n"
+                if len(footer_text) > 0:
+                    footer_text = f"\n[footer]: # ({footer_text})\n"
+                page_text_raw = "\n\n".join([p for p in [header_text, body_text, footer_text] if p])
+                page_text_raw = _dehyphenate_text(page_text_raw)
+                page_text = _join_soft_wrapped_lines(page_text_raw)
+                page_text = _fix_intra_word_spaces(page_text)
+                if table_blocks:
+                    table_text = "\n\n".join(table_blocks)
+                    page_text = "\n\n".join([p for p in [page_text, table_text] if p])
+
+                if not _page_has_extracted_text(page_text):
+                    ocr_text = _ocr_text_from_page(Path(pdf_path), _page_num - 1)
+                    if ocr_text:
+                        ocr_pages += 1
+                        page_text = ocr_text
+
+            all_text.append(f"## Page {label}\n\n{page_text or ''}")
+
+    pages_summary = "Pages détectées: " + _group_page_labels(page_labels)
+    markdown_body = pages_summary + "\n\n" + "\n\n".join(all_text)
+    return {
+        "markdown_body": markdown_body,
+        "page_labels": page_labels,
+        "ocr_pages": ocr_pages,
+        "pdf_metadata": pdf_metadata,
+        "selected_ocr_quality": new_quality if force_full_ocr else old_quality,
+    }
+
+
+def _register_markdown_source_document(md_path: Path, pdf_path: Path, language_distribution: str, date_publication: str = "") -> None:
     if not _DB_AVAILABLE:
         return
 
@@ -1531,16 +1828,19 @@ def _register_markdown_source_document(md_path: Path, pdf_path: Path, language_d
     con = None
     try:
         con = _GET_DB_CONNECTION()
+        source_data = {
+            "parent_path": _to_repo_rel(pdf_path),
+            "path": _to_repo_rel(md_path),
+            "file_name": md_path.name,
+            "relative_path": md_path.name,
+            "author": "skill " + SKILL_NAME,
+            "ner_status": ner_status,
+        }
+        if date_publication:
+            source_data["date_publication"] = date_publication
         result = _UPSERT_SOURCE(
             con,
-            {
-                "parent_path": _to_repo_rel(pdf_path),
-                "path": _to_repo_rel(md_path),
-                "file_name": md_path.name,
-                "relative_path": md_path.name,
-                "author": "skill " + SKILL_NAME,
-                "ner_status": ner_status,
-            },
+            source_data,
         )
         if result.get("action") == "error":
             print(
@@ -1624,108 +1924,79 @@ def extract_pdf_to_md(pdf_path: Path, md_path: Path | None = None, *, no_transla
 
 
 def process_pdf(pdf_path, page_numbers=None, md_path=None, *, no_translate: bool = False, write_files:bool = True):
-    all_text = []
-    page_labels = []  # Liste pour conserver les numéros de pages détectés
-    ocr_pages = 0
+    pdf_path = Path(pdf_path)
     md_path = Path(md_path) if md_path else Path(pdf_path).with_suffix(".md")
+    source_context = _get_db_source_context(pdf_path)
+    source_url = str((source_context or {}).get("URL") or "").strip() if source_context else ""
 
-    with pdfplumber.open(pdf_path) as pdf:
-        pdf_metadata = dict(pdf.metadata or {})
+    markdown_body = ""
+    page_labels: list[str] = []
+    ocr_pages = 0
+    pdf_metadata: dict | None = None
+    selected_ocr_quality = 0.0
+    mistral_errors: list[str] = []
+    used_mistral = False
+    final_ocr_status = "F"
 
-        # Sélection des pages physiques à extraire du PDF (API 1-based).
-        if page_numbers is not None:
-            if isinstance(page_numbers, (str, bytes)):
-                raise TypeError("page_numbers doit être une liste/itérable d'entiers (pages physiques 1-based).")
-
-            pages_with_idx = []
-            for raw_page_num in page_numbers:
-                page_num = int(raw_page_num)
-                page_index = page_num - 1
-                if page_index < 0 or page_index >= len(pdf.pages):
-                    raise ValueError(f"page_numbers contient une page hors limites: {page_num} (1..{len(pdf.pages)})")
-                pages_with_idx.append((page_num, pdf.pages[page_index]))
-        else:
-            pages_with_idx = list(enumerate(pdf.pages, 1))
-
-        force_full_ocr = False
-        force_reason = ""
-        old_quality = 0.0
-        new_quality = 0.0
+    mistral_markdown = None
+    mistral_mode = None
+    mistral_payload = None
+    if page_numbers is None:
+        mistral_markdown, mistral_mode, mistral_payload, mistral_errors = _try_mistral_ocr_markdown(pdf_path, source_url or None)
+    else:
+        mistral_errors = ["mistral_skipped_for_partial_page_debug"]
+    if mistral_markdown:
         try:
-            force_full_ocr, force_reason, old_quality, new_quality = _assess_ocr_replacement(
-                Path(pdf_path),
-                pages_with_idx,
-                pdf_metadata,
-            )
+            if write_files and mistral_payload is not None:
+                mistral_markdown, extracted_count, image_error = _rewrite_mistral_markdown_image_links(
+                    pdf_path,
+                    md_path,
+                    mistral_markdown,
+                    mistral_payload,
+                )
+                if image_error:
+                    mistral_errors.append(f"mistral_image_extract_error:{image_error}")
+                elif extracted_count > 0:
+                    print(f"info: {extracted_count} image(s) extraites pour {pdf_path.name}", flush=True)
+
+            with pdfplumber.open(pdf_path) as pdf:
+                pdf_metadata = dict(pdf.metadata or {})
+                fallback_total_pages = len(pdf.pages)
+            page_labels, sections = _mistral_markdown_to_page_sections(mistral_markdown, fallback_total_pages)
+            pages_summary = "Pages détectées: " + _group_page_labels(page_labels or [str(i) for i in range(1, len(sections) + 1)])
+            markdown_body = pages_summary + "\n\n" + "\n\n".join(sections)
+            ocr_pages = len(sections)
+            selected_ocr_quality = 1.0
+            used_mistral = True
+            final_ocr_status = "D"
+            print(f"info: OCR Mistral utilisé ({mistral_mode}) pour {pdf_path.name}", flush=True)
         except Exception as exc:
-            force_full_ocr = False
-            force_reason = f"ocr_assessment_error:{exc}"
+            mistral_errors.append(f"mistral_postprocess_error:{exc}")
+            used_mistral = False
 
-        # if force_full_ocr:
-        #     print(
-        #         "info: remplacement OCR activé "
-        #         f"(raison={force_reason}, old_quality={old_quality:.3f}, new_quality={new_quality:.3f})",
-        #         flush=True,
-        #     )
+    if not used_mistral:
+        try:
+            local_result = _local_process_pdf(pdf_path, page_numbers=page_numbers)
+            markdown_body = local_result["markdown_body"]
+            page_labels = local_result["page_labels"]
+            ocr_pages = local_result["ocr_pages"]
+            pdf_metadata = local_result["pdf_metadata"]
+            selected_ocr_quality = local_result["selected_ocr_quality"]
+            final_ocr_status = "T"
+            if mistral_errors:
+                print(f"warn: OCR Mistral indisponible/échoué pour {pdf_path.name}: {' | '.join(mistral_errors)}", flush=True)
+        except Exception as exc:
+            _set_pdf_ocr_status(pdf_path, "F")
+            print(f"warn: echec fallback OCR local pour {pdf_path.name}: {exc}", flush=True)
+            raise
 
-        prev_label = ""
-        for _page_num, page in pages_with_idx:
-            if force_full_ocr:
-                label = _next_page_label(prev_label, str(_page_num)) if prev_label else str(_page_num)
-                label = _normalize_page_label(label)
-                prev_label = label
-                page_labels.append(label)
-
-                page_text = _ocr_text_from_page(Path(pdf_path), _page_num - 1)
-                if page_text:
-                    ocr_pages += 1
-                else:
-                    page_text = ""
-            else:
-                chars = _extract_tables_and_chars(page)
-                table_blocks = [ch["text"] for ch in chars if ch.get("is_markdown_block")]
-                chars = [ch for ch in chars if not ch.get("is_markdown_block")]
-
-                # Extraction séparée des header, body, footer
-                header_text, body_text, footer_text = _extract_text_with_header_footer(chars, page.width, page.height)
-
-                # Détection du numéro de page à partir du header/footer
-                label = _detect_page_label_from_header_footer(header_text, body_text, footer_text, prev_label)
-                label = _normalize_detected_page_label(prev_label, label)
-                prev_label = label
-                page_labels.append(label)
-
-                # Recomposer le texte de la page avec dehyphenation et recollement
-                if len(header_text)>0:
-                    header_text = f"\n[header]: # ({header_text})\n"
-                if len(footer_text)>0:
-                    footer_text = f"\n[footer]: # ({footer_text})\n"
-                page_text_raw = "\n\n".join([p for p in [header_text, body_text, footer_text] if p])
-                page_text_raw = _dehyphenate_text(page_text_raw)
-                page_text = _join_soft_wrapped_lines(page_text_raw)
-                page_text = _fix_intra_word_spaces(page_text)
-                if table_blocks:
-                    table_text = "\n\n".join(table_blocks)
-                    page_text = "\n\n".join([p for p in [page_text, table_text] if p])
-
-                if not _page_has_extracted_text(page_text):
-                    ocr_text = _ocr_text_from_page(Path(pdf_path), _page_num - 1)
-                    if ocr_text:
-                        ocr_pages += 1
-                        page_text = ocr_text
-
-            all_text.append(f"## Page {label}\n\n{page_text or ''}")
-
-    # Écrire la liste des numéros de pages en haut du contenu (format regroupé).
-    pages_summary = "Pages détectées: " + _group_page_labels(page_labels)
-    markdown_body = pages_summary + "\n\n" + "\n\n".join(all_text)
     language_distribution = _compute_language_distribution(markdown_body)
     date_publication, date_event = _resolve_publication_and_date_events(
         pdf_metadata,
         Path(pdf_path).stem,
         markdown_body,
     )
-    selected_ocr_quality = new_quality if force_full_ocr else old_quality
+    selected_ocr_quality = selected_ocr_quality if selected_ocr_quality > 0 else None
     frontmatter = _build_pdf_frontmatter(
         Path(pdf_path),
         len(page_labels),
@@ -1740,7 +2011,9 @@ def process_pdf(pdf_path, page_numbers=None, md_path=None, *, no_translate: bool
     if write_files:
         md_path.parent.mkdir(parents=True, exist_ok=True)
         md_path.write_text(content, encoding="utf-8")
-        _register_markdown_source_document(md_path, Path(pdf_path), language_distribution)
+        _set_pdf_publication_date(pdf_path, date_publication)
+        _register_markdown_source_document(md_path, Path(pdf_path), language_distribution, date_publication)
+        _set_pdf_ocr_status(pdf_path, final_ocr_status)
         if not no_translate:
             _maybe_trigger_translation(md_path, language_distribution)
 
