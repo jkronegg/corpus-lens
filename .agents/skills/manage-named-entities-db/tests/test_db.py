@@ -7,7 +7,15 @@ import unittest
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[5]
+def _resolve_repo_root() -> Path:
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        if (parent / "AGENTS.md").exists() and (parent / ".agents").is_dir():
+            return parent
+    raise RuntimeError(f"Impossible de localiser la racine du repo depuis: {current}")
+
+
+REPO_ROOT = _resolve_repo_root()
 DB_MODULE_PATH = REPO_ROOT / ".agents" / "skills" / "manage-named-entities-db" / "scripts" / "db.py"
 
 

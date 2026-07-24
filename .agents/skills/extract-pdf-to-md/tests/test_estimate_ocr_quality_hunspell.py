@@ -31,14 +31,12 @@ class TestEstimateOcrQualityHunspell(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.current_dir = Path(__file__).resolve().parent
-        cls.workspace_root = cls.current_dir.parents[4]
-        script_path = cls.current_dir.parent / "estimate_ocr_quality_hunspell.py"
+        script_path = cls.current_dir.parent / "scripts" / "estimate_ocr_quality_hunspell.py"
         spec = importlib.util.spec_from_file_location("estimate_ocr_quality_hunspell", script_path)
         cls.module = importlib.util.module_from_spec(spec)
         assert spec.loader is not None
         sys.modules[spec.name] = cls.module
         spec.loader.exec_module(cls.module)
-        cls.reference_markdown_path = cls.workspace_root / "sources" / "generic-urls" / "preavis-nÂ°-02-2020.md"
 
     def test_markdown_cleanup_removes_front_matter_and_table_separators(self):
         markdown = """---
@@ -110,9 +108,22 @@ Pages détectées: 1-2
             self.assertEqual(dic_path.name, "fr.dic")
 
     def test_reference_markdown_is_analyzable(self):
-        self.assertTrue(self.reference_markdown_path.exists(), f"Markdown de référence introuvable: {self.reference_markdown_path}")
+        repeated_line = "Le Conseil communal examine le preavis municipal et vote la decision finale."
+        body = "\n".join([repeated_line for _ in range(60)])
+        markdown = (
+            "---\n"
+            "titre: \"Reference\"\n"
+            "source: \"reference.pdf\"\n"
+            "---\n\n"
+            "Pages detectees: 1\n\n"
+            "## Page 1\n\n"
+            f"{body}\n"
+        )
 
-        report = self.module.analyze_markdown_file(self.reference_markdown_path, AcceptAllChecker())
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sample_path = Path(tmp_dir) / "reference.md"
+            sample_path.write_text(markdown, encoding="utf-8")
+            report = self.module.analyze_markdown_file(sample_path, AcceptAllChecker())
 
         self.assertGreater(report.token_count, 300)
         self.assertGreater(report.checked_words, 200)
@@ -122,6 +133,4 @@ Pages détectées: 1-2
 
 if __name__ == "__main__":
     unittest.main()
-
-
 

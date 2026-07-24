@@ -8,7 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-SCRIPTS_DIR = Path(__file__).resolve().parent
+TESTS_DIR = Path(__file__).resolve().parent
+SCRIPTS_DIR = TESTS_DIR.parent / "scripts"
 MODULE_PATH = SCRIPTS_DIR / "fetch_dodis_document_content.py"
 
 

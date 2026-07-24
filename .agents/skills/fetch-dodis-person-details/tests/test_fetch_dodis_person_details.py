@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
-MODULE_PATH = SCRIPTS_DIR / "fetch_dodis_person_details.py"
+MODULE_PATH = SCRIPTS_DIR.parent / "scripts" / "fetch_dodis_person_details.py"
 
 
 def _load_module():
@@ -76,12 +76,15 @@ class FetchDodisPersonDetailsTests(unittest.TestCase):
             source_url="https://dodis.ch/P80148",
             page_title="Dodis Person",
             page_text="Contenu de test",
+            sections=[],
+            root_blocks=[],
+            downloaded_images=[],
             persons_csv=Path(".agents/skills/fetch-dodis-person-details/assets/persons.csv"),
         )
         self.assertIn('transformation_by: "skill fetch-dodis-person-details"', md)
         self.assertIn("## Page 1", md)
         self.assertIn("## Contenu Dodis", md)
-        self.assertIn("Contenu de test", md)
+        self.assertIn("- URL: https://dodis.ch/P80148", md)
 
 
 if __name__ == "__main__":

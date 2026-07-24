@@ -1784,33 +1784,29 @@ def _delete_orphaned_entities_and_mentions(con, source_document_id: int) -> None
         placeholders = ",".join("?" * len(mention_ids))
         con.execute(f"DELETE FROM mention WHERE id IN ({placeholders})", mention_ids)
 
-    # 3. Récupérer tous les person_id et named_entity_id qui pourraient être orphelins
-    all_person_ids = con.execute("SELECT DISTINCT person_id FROM mention WHERE person_id IS NOT NULL").fetchall()
-    all_named_entity_ids = con.execute("SELECT DISTINCT named_entity_id FROM mention WHERE named_entity_id IS NOT NULL").fetchall()
+    # 3. Supprimer les personnes devenues orphelines.
+    con.execute(
+        """
+        DELETE FROM person
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM mention m
+            WHERE m.entity_id = person.entity_id
+        )
+        """
+    )
 
-    # 4. Supprimer les person qui n'ont aucune mention
-    for row in all_person_ids:
-        person_id = row["person_id"]
-        if person_id is None:
-            continue
-        mention_count = con.execute(
-            "SELECT COUNT(*) as cnt FROM mention WHERE person_id = ?",
-            (person_id,),
-        ).fetchone()["cnt"]
-        if mention_count == 0:
-            con.execute("DELETE FROM person WHERE id = ?", (person_id,))
-
-    # 5. Supprimer les named_entity qui n'ont aucune mention
-    for row in all_named_entity_ids:
-        named_entity_id = row["named_entity_id"]
-        if named_entity_id is None:
-            continue
-        mention_count = con.execute(
-            "SELECT COUNT(*) as cnt FROM mention WHERE named_entity_id = ?",
-            (named_entity_id,),
-        ).fetchone()["cnt"]
-        if mention_count == 0:
-            con.execute("DELETE FROM named_entity WHERE id = ?", (named_entity_id,))
+    # 4. Supprimer les entités nommées devenues orphelines.
+    con.execute(
+        """
+        DELETE FROM named_entity
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM mention m
+            WHERE m.entity_id = named_entity.id
+        )
+        """
+    )
 
 
 def _sync_deleted_files(con) -> dict[str, int]:

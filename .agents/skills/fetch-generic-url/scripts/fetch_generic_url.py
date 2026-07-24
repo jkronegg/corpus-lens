@@ -9,6 +9,7 @@ import importlib.util
 import json
 import mimetypes
 import re
+import shutil
 import subprocess
 import sys
 import unicodedata
@@ -456,15 +457,36 @@ def _process_worklist(
             _save_worklist(worklist_path, worklist)
 
         preferred_name = Path(urlparse(doc_url).path).name or f"document_{attempts + 1}"
-        output_path = _download_file_with_metadata(
+        temp_download_dir = output_dir / ".tmp_fetch_generic_url"
+        temp_output_path = _download_file_with_metadata(
             doc_url,
-            output_dir,
+            temp_download_dir,
             session,
             max_redirects,
             preferred_filename=preferred_name,
         )
 
-        if output_path:
+        if temp_output_path:
+            source_signature = generate_signature(str(temp_output_path))
+            existing_sources: list[dict] = []
+            if DB_AVAILABLE and db_con:
+                existing_sources = _find_sources_by_signature(db_con, source_signature)
+
+            if existing_sources:
+                _warn_if_signature_url_mismatch(existing_sources, doc_url)
+                try:
+                    temp_output_path.unlink(missing_ok=True)
+                except Exception as e:
+                    print(f"[WARN] Impossible de supprimer le fichier temporaire {temp_output_path}: {e}")
+
+                item["status"] = "skipped"
+                item["last_error"] = "duplicate_signature_already_in_source"
+                item["requires_head_check"] = False
+                item["updated_at"] = _utc_timestamp()
+                _save_worklist(worklist_path, worklist)
+                continue
+
+            output_path = _persist_temp_download(temp_output_path, output_dir)
             pdf_page_count = get_pdf_page_count(output_path)
             item["status"] = "done"
             item["last_error"] = ""
@@ -473,7 +495,7 @@ def _process_worklist(
 
             if DB_AVAILABLE and db_con and callable(upsert_source):
                 source_entry = {
-                    "signature": generate_signature(str(output_path)),
+                    "signature": source_signature,
                     "identifiant_source": slugify(Path(output_path).stem),
                     "titre": Path(output_path).stem,
                     "date_publication": publication_date_for_downloaded_file(output_path),
@@ -723,13 +745,61 @@ def _ensure_unique_path(path: Path) -> Path:
         counter += 1
 
 
-def _sanitize_filename(filename: str) -> str:
-    """Make filename safe for local filesystem (especially Windows)."""
-    # Remove control chars and Windows-forbidden characters.
-    safe = re.sub(r'[\x00-\x1f<>:"/\\|?*]+', "-", filename or "")
-    safe = re.sub(r"\s+", " ", safe).strip(" .")
-    safe = re.sub(r"-+", "-", safe)
-    return safe or "document"
+def _normalize_url_for_compare(url: str) -> str:
+    """Normalize URL for stable comparison in dedup checks."""
+    candidate = str(url or "").strip()
+    if not candidate:
+        return ""
+    return candidate[:-1] if candidate.endswith("/") else candidate
+
+
+def _source_url_for_comparison(row: dict) -> str:
+    """Return the best URL-like value from a source row for comparisons."""
+    url = str(row.get("url") or "").strip()
+    if url:
+        return url
+    origin = str(row.get("origine") or "").strip()
+    if origin.lower().startswith(("http://", "https://")):
+        return origin
+    return ""
+
+
+def _find_sources_by_signature(db_con, signature: str) -> list[dict]:
+    """Return existing source rows for a given source signature."""
+    if not db_con or not signature:
+        return []
+    rows = db_con.execute(
+        """
+        SELECT id, signature, url, origine, identifiant_source, titre
+        FROM source
+        WHERE signature = ?
+        ORDER BY id
+        """,
+        (signature,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _warn_if_signature_url_mismatch(existing_sources: list[dict], new_url: str) -> None:
+    """Warn when same content signature is already indexed under another URL."""
+    normalized_new = _normalize_url_for_compare(new_url)
+    for source_row in existing_sources:
+        existing_url = _source_url_for_comparison(source_row)
+        normalized_existing = _normalize_url_for_compare(existing_url)
+        if normalized_existing and normalized_existing != normalized_new:
+            print(
+                "[WARN] Signature déjà présente avec une URL différente "
+                f"(source_id={source_row.get('id')}, existing_url={existing_url}, new_url={new_url}). "
+                "Deux URLs différentes pointent probablement vers le même document réel."
+            )
+
+
+def _persist_temp_download(temp_path: Path, output_dir: Path) -> Path:
+    """Move a temporary download into final output_dir with collision-safe naming."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    final_path = _ensure_unique_path(output_dir / temp_path.name)
+    shutil.move(str(temp_path), str(final_path))
+    return final_path
 
 
 def _download_file_with_metadata(

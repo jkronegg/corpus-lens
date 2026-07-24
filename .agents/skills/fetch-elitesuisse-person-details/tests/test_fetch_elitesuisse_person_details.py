@@ -8,8 +8,8 @@ import unittest
 from pathlib import Path
 
 
-SKILL_DIR = Path(__file__).resolve().parent
-MODULE_PATH = SKILL_DIR / "fetch_elitesuisse_person_details.py"
+SKILL_DIR = Path(__file__).resolve().parents[1]
+MODULE_PATH = SKILL_DIR / "scripts" / "fetch_elitesuisse_person_details.py"
 
 
 def _load_module():

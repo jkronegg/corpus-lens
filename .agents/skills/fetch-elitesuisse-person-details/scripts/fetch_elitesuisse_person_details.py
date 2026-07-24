@@ -467,6 +467,10 @@ def build_markdown(
             continue
         key = _normalize_title_key(sec_title)
         blocks = list(sec.get("blocks") or [])
+        # Compatibilite avec l'ancien schema de sections utilise dans certains tests.
+        legacy_text = (sec.get("text") or "").strip()
+        if not blocks and legacy_text:
+            blocks = [{"type": "text", "text": legacy_text}]
         existing_index = section_index_by_title.get(key)
         if existing_index is None:
             section_index_by_title[key] = len(sections)
@@ -525,6 +529,8 @@ def build_markdown(
         details_text_parts.append((details.get("body_excerpt") or "").strip())
     language_distribution = _compute_language_distribution("\n\n".join(part for part in details_text_parts if part))
 
+    csv_source = str(csv_path).replace("\\", "/")
+
     lines: list[str] = [
         "---",
         f'title: "{_yaml_quote(title)}"',
@@ -534,6 +540,9 @@ def build_markdown(
         f'citation: "{_yaml_quote(citation)}"',
         f'language_distribution: "{_yaml_quote(language_distribution)}"',
         'transformation_by: "skill fetch-elitesuisse-person-details"',
+        "sources:",
+        f'  - "{_yaml_quote(person_url)}"',
+        f'  - "{_yaml_quote(csv_source)}"',
         "---",
         "",
         "## Page 1",

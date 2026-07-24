@@ -5,6 +5,35 @@
     <content url="file://$MODULE_DIR$">
       <sourceFolder url="file://$MODULE_DIR$/.agents/skills/fetch-dhs-article/scripts" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/.agents/skills/fetch-dhs-article/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/extract-pdf-to-md/scripts" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/extract-pdf-to-md/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/fetch-generic-url/scripts" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/fetch-generic-url/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/indexer-sources/scripts" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/reclass-source-documents/scripts" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/analyse-population-suisse/scripts" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/analyse-resultats-votation/scripts" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/analyse-swissvotes-votations/scripts" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/extract-pdf-to-md-all-sources/scripts" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/extract-pdf-to-md-all-sources/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/fetch-dodis-document-content/scripts" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/fetch-dodis-document-content/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/fetch-dodis-person-details/scripts" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/fetch-dodis-person-details/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/fetch-dodis-results/scripts" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/fetch-elitesuisse-person-details/scripts" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/fetch-elitesuisse-person-details/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/fetch-enewspaper-article-content/scripts" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/fetch-enewspaper-article-list/scripts" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/fetch-enewspaper-article-list/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/fetch-swissvote-votation-sources/scripts" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/fetch-swissvote-votation-sources/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/fetch-wikipedia-article/scripts" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/fetch-wikipedia-article/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/indexer-sources/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/manage-named-entities-db/scripts" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/manage-named-entities-db/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/translate-markdown/scripts" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
     </content>
     <orderEntry type="inheritedJdk" />

@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-MODULE_PATH = Path(__file__).resolve().parent.parent / "fetch_wikipedia_article.py"
+MODULE_PATH = Path(__file__).resolve().parent.parent / "scripts" / "fetch_wikipedia_article.py"
 
 
 def _load_module():

@@ -73,11 +73,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Regenerate Markdown even if .md already exists",
     )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Only show what would be processed",
-    )
     return parser.parse_args()
 
 
@@ -159,11 +154,6 @@ def main() -> int:
             _print_progress(index, pdf_total)
             continue
 
-        if args.dry_run:
-            results.append(FileResult(pdf_path=str(pdf_path), md_path=str(md_path), status="planned"))
-            _print_progress(index, pdf_total)
-            continue
-
         try:
             pages = int(extract_pdf_to_md(pdf_path, md_path))
             results.append(FileResult(pdf_path=str(pdf_path), md_path=str(md_path), status="extracted", pages=pages))
@@ -175,11 +165,9 @@ def main() -> int:
         "transformation_by": "skill " + SKILL_NAME,
         "sources_root": str(sources_root),
         "overwrite": bool(args.overwrite),
-        "dry_run": bool(args.dry_run),
         "selection_mode": selection_mode,
         "counts": {
             "pdf_total": len(pdf_files),
-            "planned": sum(1 for r in results if r.status == "planned"),
             "extracted": sum(1 for r in results if r.status == "extracted"),
             "skipped_exists": sum(1 for r in results if r.status == "skipped_exists"),
             "errors": sum(1 for r in results if r.status == "error"),
@@ -191,7 +179,6 @@ def main() -> int:
     only_skipped = (
         counts["pdf_total"] > 0
         and counts["skipped_exists"] == counts["pdf_total"]
-        and counts["planned"] == 0
         and counts["extracted"] == 0
         and counts["errors"] == 0
     )

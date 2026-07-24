@@ -9,7 +9,7 @@ class TestExtractPanda(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.current_dir = Path(__file__).resolve().parent
-        script_path = cls.current_dir / "../pdf_to_md_extractor.py"
+        script_path = cls.current_dir / "../scripts/pdf_to_md_extractor.py"
         if not script_path.exists():
             raise FileNotFoundError(f"Script introuvable: {script_path}")
         spec = importlib.util.spec_from_file_location("pdf_to_md_extractor", script_path)

@@ -17,7 +17,6 @@ Ce skill parcourt récursivement `sources/**/*.pdf` et lance l'extraction Markdo
 
 - `--sources-root` (optionnel): racine à scanner, défaut: `<repo>/sources`
 - `--overwrite` (optionnel): force la régénération des `.md` existants
-- `--dry-run` (optionnel): planifie sans écrire de fichiers
 
 ## Output
 
@@ -34,9 +33,6 @@ python -u ".agents/skills/extract-pdf-to-md-all-sources/scripts/extract_pdf_to_m
 python -u ".agents/skills/extract-pdf-to-md-all-sources/scripts/extract_pdf_to_md_all_sources.py" --overwrite
 ```
 
-```powershell
-python -u ".agents/skills/extract-pdf-to-md-all-sources/scripts/extract_pdf_to_md_all_sources.py" --dry-run
-```
 
 ## Note d'implémentation
 
