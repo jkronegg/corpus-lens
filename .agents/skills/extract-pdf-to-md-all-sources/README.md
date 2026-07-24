@@ -14,9 +14,3 @@ python -u ".agents/skills/extract-pdf-to-md-all-sources/scripts/extract_pdf_to_m
 python -u ".agents/skills/extract-pdf-to-md-all-sources/scripts/extract_pdf_to_md_all_sources.py" --overwrite
 ```
 
-## Dry run
-
-```powershell
-python -u ".agents/skills/extract-pdf-to-md-all-sources/scripts/extract_pdf_to_md_all_sources.py" --dry-run
-```
-

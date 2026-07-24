@@ -678,10 +678,24 @@ def _filename_from_content_disposition(content_disposition: str) -> Optional[str
     if not content_disposition:
         return None
 
+    def _repair_mojibake(value: str) -> str:
+        """Fix common UTF-8 decoded as Latin-1 artifacts (e.g. nÂ° -> n°)."""
+        if not value or not any(token in value for token in ("Â", "Ã", "â")):
+            return value
+        try:
+            repaired = value.encode("latin-1").decode("utf-8")
+            if repaired:
+                return repaired
+        except UnicodeError:
+            pass
+        return value
+
     # RFC 5987 style: filename*=UTF-8''... (possibly percent-encoded)
     match = re.search(r"filename\*\s*=\s*UTF-8''([^;]+)", content_disposition, flags=re.IGNORECASE)
     if match:
         value = unquote(match.group(1).strip().strip('"'))
+        value = _repair_mojibake(value)
+        value = value.replace('"', "")
         return Path(value).name
 
     # Generic form: filename=... 
@@ -708,6 +722,10 @@ def _filename_from_content_disposition(content_disposition: str) -> Optional[str
                     value = inner
             else:
                 value = inner
+
+        value = unquote(value)
+        value = _repair_mojibake(value)
+        value = value.replace('"', "")
         
         # Fallback: if value still has issues, extract the last quoted/unquoted segment ending with .pdf
         if '.pdf' in value.lower():
@@ -730,6 +748,15 @@ def _guess_extension_from_content_type(content_type: str) -> Optional[str]:
     if not mime:
         return None
     return mimetypes.guess_extension(mime)
+
+
+def _sanitize_filename(filename: str) -> str:
+    """Make filename safe for local filesystem (especially Windows)."""
+    # Remove control chars and Windows-forbidden characters.
+    safe = re.sub(r'[\x00-\x1f<>:"/\\|?*]+', "-", filename or "")
+    safe = re.sub(r"\s+", " ", safe).strip(" .")
+    safe = re.sub(r"-+", "-", safe)
+    return safe or "document"
 
 
 def _ensure_unique_path(path: Path) -> Path:

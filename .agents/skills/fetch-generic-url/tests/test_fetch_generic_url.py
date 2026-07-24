@@ -424,6 +424,40 @@ class TestHandleDirectDocument(unittest.TestCase):
             self.assertFalse(result)
 
 
+class TestDownloadFileWithMetadata(unittest.TestCase):
+    """Tests ciblés pour _download_file_with_metadata."""
+
+    @patch('fetch_generic_url.requests.Session.get')
+    def test_download_file_with_metadata_returns_saved_path(self, mock_get):
+        """TDD RED: doit retourner un fichier téléchargé valide."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.history = []
+        mock_response.url = "https://example.com/download"
+        mock_response.headers = {
+            "content-type": "application/pdf",
+            "content-length": "7",
+            "content-disposition": 'attachment; filename="rapport.pdf"',
+        }
+        mock_response.iter_content.return_value = [b"PDFDATA"]
+        mock_get.return_value = mock_response
+
+        session = dgu.requests.Session()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            output_path = dgu._download_file_with_metadata(
+                "https://example.com/download",
+                output_dir,
+                session,
+                3,
+            )
+
+            self.assertIsNotNone(output_path)
+            self.assertTrue(output_path.exists())
+            self.assertEqual(output_path.name, "rapport.pdf")
+
+
 class TestHandleWebpageWithDocumentType(unittest.TestCase):
     """Tests for webpage with document_type handling."""
     
