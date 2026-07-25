@@ -41,7 +41,7 @@ except ImportError:
 
 # Importe le module db pour insertion optionnelle
 sys.path.insert(0, str(Path(__file__).parent))
-from db import add_mention, search_person, source_has_mentions, upsert_person, get_connection, delete_mentions_for_source
+from db import add_mention, search_person, source_has_mentions, upsert_person, get_connection, delete_mentions_for_source, update_source_document_ner_status
 
 # ---------------------------------------------------------------------------
 # Configuration spaCy
@@ -835,6 +835,22 @@ def extract_entities_to_db(
                     quiet=quiet,
                     log_file=log_file,
                 )
+        
+        # Mettre à jour le statut NER à 2 si des mentions ont été insérées
+        if inserted > 0:
+            ner_status_result = update_source_document_ner_status(con, source_name, 2)
+            if ner_status_result["action"] == "updated":
+                _emit(
+                    f"[insert] Statut NER du document mis à jour à 2 (avec mentions) : {source_name}",
+                    quiet=quiet,
+                    log_file=log_file,
+                )
+            elif ner_status_result["action"] == "error":
+                _emit(
+                    f"[insert][WARN] Erreur lors de la mise à jour du statut NER : {ner_status_result['reason']}",
+                    quiet=quiet,
+                    log_file=log_file,
+                )
     finally:
         con.close()
 
@@ -990,6 +1006,14 @@ def main() -> None:
                         skipped += 1
                 except Exception as e:
                     print(f"  ✗ Erreur pour {mention['person']}: {e}", file=sys.stderr)
+            
+            # Mettre à jour le statut NER à 2 si des mentions ont été insérées
+            if inserted > 0:
+                ner_status_result = update_source_document_ner_status(con, source_name, 2)
+                if ner_status_result["action"] == "updated":
+                    print(f"[insert] Statut NER du document mis à jour à 2 (avec mentions) : {source_name}")
+                elif ner_status_result["action"] == "error":
+                    print(f"[insert][WARN] Erreur lors de la mise à jour du statut NER : {ner_status_result['reason']}", file=sys.stderr)
         finally:
             con.close()
         print(f"[insert] {inserted} insertions, {skipped} ignorées (doublons)")

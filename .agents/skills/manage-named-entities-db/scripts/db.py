@@ -532,6 +532,39 @@ def update_source_ocr_status(con: sqlite3.Connection, source_id: int, ocr_status
     return {"action": "updated", "source_id": source_id, "ocr_status": normalized}
 
 
+def update_source_document_ner_status(con: sqlite3.Connection, source_path: str, ner_status: int) -> dict:
+    """
+    Met à jour le statut NER d'un document source.
+
+    ner_status:
+        0 = not NER-able (fichiers non-.md)
+        1 = NER-able (fichier .md sans mentions reconnaissables)
+        2 = NER-ed (fichier .md avec mentions enregistrées)
+
+    Retourne {"action": "updated", "path": str, "ner_status": int}
+             ou {"action": "error", "reason": str}
+    """
+    if ner_status not in {0, 1, 2}:
+        return {"action": "error", "reason": f"ner_status doit être 0, 1 ou 2, pas {ner_status}"}
+
+    normalized_path = str(source_path or "").strip().replace("\\", "/")
+    with con:
+        row = con.execute(
+            "SELECT id FROM source_document WHERE path = ? LIMIT 1",
+            (normalized_path,)
+        ).fetchone()
+
+        if row is None:
+            return {"action": "error", "reason": f"Document introuvable: {normalized_path}"}
+
+        con.execute(
+            "UPDATE source_document SET ner_status = ? WHERE path = ?",
+            (ner_status, normalized_path)
+        )
+
+    return {"action": "updated", "path": normalized_path, "ner_status": ner_status}
+
+
 def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
     """Crée/maj une source (parent_path vide) ou un document dérivé (parent_path renseigné)."""
     entry = _normalize_source_entry(source)
