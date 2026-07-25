@@ -20,8 +20,9 @@ Ce skill parcourt récursivement `sources/**/*.pdf` et lance l'extraction Markdo
 
 ## Output
 
-- Affiche un résumé JSON (totaux + détails par fichier)
-- Retour code 1 si au moins une extraction a échoué, sinon 0
+- Ecrit un fichier JSON de resume (totaux + details par fichier)
+- Affiche uniquement le nom du fichier JSON en fin de traitement
+- Retour code 1 si au moins une extraction a echoue, sinon 0
 
 ## Commandes
 

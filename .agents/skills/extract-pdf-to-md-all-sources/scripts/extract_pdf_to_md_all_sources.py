@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
+import io
 import json
 import sys
 from dataclasses import asdict, dataclass
@@ -73,17 +75,25 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Regenerate Markdown even if .md already exists",
     )
+    parser.add_argument(
+        "--summary-path",
+        type=Path,
+        default=None,
+        help="Path for the JSON summary file (default: <repo>/extract_pdf_to_md_all_sources_summary.json)",
+    )
     return parser.parse_args()
 
 
-def _print_progress(current: int, total: int, width: int = 30) -> None:
+def _print_progress(current: int, total: int, label: str = "") -> None:
     if total <= 0:
         return
-    filled = int(width * current / total)
-    bar = "#" * filled + "-" * (width - filled)
-    print(f"\rConversion PDF vers Markdown: [{bar}] {current}/{total}", end="", file=sys.stderr, flush=True)
-    if current == total:
-        print(file=sys.stderr)
+    width = 30
+    ratio = current / total
+    filled = int(width * ratio)
+    bar = "█" * filled + "░" * (width - filled)
+    suffix = f" {label}" if label else ""
+    end = "\n" if current >= total else "\r"
+    print(f"[PDF] |{bar}| {current:>3}/{total:<3}{suffix}", end=end, flush=True)
 
 
 def _collect_pdf_candidates_from_db(repo_root: Path, sources_root: Path) -> tuple[list[Path], str]:
@@ -133,6 +143,7 @@ def main() -> int:
         raise FileNotFoundError(f"sources root not found: {sources_root}")
 
     repo_root = Path(__file__).resolve().parents[4]
+    summary_path = (args.summary_path or (repo_root / "extract_pdf_to_md_all_sources_summary.json")).resolve()
     extract_pdf_to_md = _load_unit_extractor(repo_root)
 
     pdf_files, selection_mode = _collect_pdf_candidates_from_db(repo_root, sources_root)
@@ -154,11 +165,22 @@ def main() -> int:
             _print_progress(index, pdf_total)
             continue
 
+        extractor_stdout = io.StringIO()
+        extractor_stderr = io.StringIO()
         try:
-            pages = int(extract_pdf_to_md(pdf_path, md_path))
+            # Keep batch logs concise by capturing verbose logs from the unit extractor.
+            with contextlib.redirect_stdout(extractor_stdout), contextlib.redirect_stderr(extractor_stderr):
+                pages = int(extract_pdf_to_md(pdf_path, md_path))
             results.append(FileResult(pdf_path=str(pdf_path), md_path=str(md_path), status="extracted", pages=pages))
         except Exception as exc:
-            results.append(FileResult(pdf_path=str(pdf_path), md_path=str(md_path), status="error", error=str(exc)))
+            captured_logs = "\n".join(
+                part for part in (extractor_stdout.getvalue().strip(), extractor_stderr.getvalue().strip()) if part
+            ).strip()
+            error_message = str(exc)
+            if captured_logs:
+                last_log_line = captured_logs.splitlines()[-1]
+                error_message = f"{error_message} | last_log={last_log_line}"
+            results.append(FileResult(pdf_path=str(pdf_path), md_path=str(md_path), status="error", error=error_message))
         _print_progress(index, pdf_total)
 
     summary = {
@@ -175,18 +197,11 @@ def main() -> int:
         "results": [asdict(r) for r in results if r.status != "skipped_exists"],
     }
 
-    counts = summary["counts"]
-    only_skipped = (
-        counts["pdf_total"] > 0
-        and counts["skipped_exists"] == counts["pdf_total"]
-        and counts["extracted"] == 0
-        and counts["errors"] == 0
-    )
-    if only_skipped:
-        print("Aucun PDF à convertir")
-        return 0
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
-    print(json.dumps(summary, indent=2, ensure_ascii=False))
+    # Keep stdout compact for callers: only emit the summary filename.
+    print(summary_path.name)
     return 1 if summary["counts"]["errors"] > 0 else 0
 
 
