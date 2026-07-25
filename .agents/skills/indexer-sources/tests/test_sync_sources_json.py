@@ -238,6 +238,84 @@ class TestSyncDeletedFiles(_TmpDirMixin):
         ).fetchall()
         self.assertEqual(remaining, [], "Les mentions du document supprimé doivent être effacées.")
 
+    def test_ancien_chemin_deja_identifie_comme_deplace_est_conserve(self):
+        """Un ancien chemin repéré comme renommé/déplacé ne doit pas être supprimé."""
+        con = _make_db()
+        old_rel = "sources/ancien.md"
+        src_id = _insert_source(con, origine=old_rel, signature="sig-move")
+        _insert_source_document(con, source_id=src_id, path=old_rel, signature="doc-move")
+
+        with patch.object(sut, "ROOT", self.tmp_path):
+            result = sut._sync_deleted_files(con, retained_paths={old_rel})
+
+        self.assertEqual(result["deleted"], 0)
+        self.assertEqual(result["retained"], 1)
+        self.assertEqual(
+            con.execute("SELECT COUNT(*) AS cnt FROM source WHERE origine = ?", (old_rel,)).fetchone()["cnt"],
+            1,
+        )
+        self.assertEqual(
+            con.execute("SELECT COUNT(*) AS cnt FROM source_document WHERE path = ?", (old_rel,)).fetchone()["cnt"],
+            1,
+        )
+
+
+class TestMainRenameDetectionOrder(_TmpDirMixin):
+    """main() doit repérer les déplacements/renommages avant d'identifier les suppressions."""
+
+    def test_transmet_les_anciens_chemins_renommes_a_la_phase_de_suppression(self):
+        con = _make_db()
+        sources_dir = self.tmp_path / "sources"
+        sources_dir.mkdir(parents=True, exist_ok=True)
+        new_file = _md(sources_dir, "nouveau.md", "## Page 1\n\nContenu déplacé.\n")
+        file_sig = sut.md5_file(new_file)
+
+        src_id = _insert_source(con, origine="sources/ancien.md", signature=file_sig)
+        _insert_source_document(con, source_id=src_id, path="sources/ancien.md", signature="doc-old")
+
+        def _fake_normalize_entry(
+            source_entry,
+            source_path,
+            active_md,
+            excerpt,
+            page_count,
+            is_readable,
+            known_authors,
+            **kwargs,
+        ):
+            return {
+                "signature": kwargs["precomputed_signature"],
+                "identifiant_source_base": "SRC-TEST",
+            }
+
+        sync_deleted = MagicMock(return_value={"deleted": 0, "retained": 1, "skipped": 0})
+
+        with patch.object(sut, "ROOT", self.tmp_path), \
+             patch.object(sut, "SOURCES_DIR", sources_dir), \
+             patch.object(sut, "AUTHORS_PATH", sources_dir / "auteurs.json"), \
+             patch.object(sut, "INDEX_LOCK_FILE", self.tmp_path / ".index.lock"), \
+             patch.object(sut, "_acquire_index_lock", return_value=(object(), "lock ok", {})), \
+             patch.object(sut, "_release_index_lock"), \
+             patch.object(sut, "get_named_entities_connection", return_value=con), \
+             patch.object(sut, "load_known_authors", return_value=[]), \
+             patch.object(sut, "normalize_md_page_sections", return_value=False), \
+             patch.object(sut, "has_valid_page_sections", return_value=True), \
+             patch.object(sut, "md_stats", return_value=(1, "Contenu déplacé.", True)), \
+             patch.object(sut, "markdown_language_distribution", return_value=None), \
+             patch.object(sut, "_parse_front_matter_fields", return_value={}), \
+             patch.object(sut, "load_source_json_metadata", return_value={}), \
+             patch.object(sut, "normalize_entry", side_effect=_fake_normalize_entry), \
+             patch.object(sut, "assign_identifiant_source"), \
+             patch.object(sut, "clean_internal_keys"), \
+             patch.object(sut, "_sync_deleted_files", sync_deleted), \
+             patch.object(sut, "replace_indexed_sources", return_value={"sources_count": 1, "documents_count": 1}), \
+             patch.object(sut, "run_pdf_extraction_batch", return_value=False):
+            sut.main()
+
+        sync_deleted.assert_called_once()
+        _, kwargs = sync_deleted.call_args
+        self.assertEqual(kwargs["retained_paths"], {"sources/ancien.md"})
+
 
 # ===========================================================================
 # POINT 2 — Extraction PDF → Markdown (sections Page X)

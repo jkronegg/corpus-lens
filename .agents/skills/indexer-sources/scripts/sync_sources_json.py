@@ -1809,20 +1809,21 @@ def _delete_orphaned_entities_and_mentions(con, source_document_id: int) -> None
     )
 
 
-def _sync_deleted_files(con) -> dict[str, int]:
-    """Synchronise la suppression de fichiers : détecte les documents dont le fichier n'existe plus.
+def _sync_deleted_files(con, retained_paths: set[str] | None = None) -> dict[str, int]:
+    """Synchronise la suppression des fichiers absents du dépôt.
 
-    Pour chaque fichier disparu:
-    1. Calcule la signature du document
-    2. Recherche le document dans la table `source_document` via la colonne `signature`
-    3. Si trouvé:
-       - Supprime toutes les mentions liées (table `mention`, colonne `source_document_id`)
-       - Supprime toutes les `person` et `named_entity` sans mentions
-       - Supprime le document dans `source_document`
-       - Supprime le document dans `source` s'il est présent
+    `retained_paths` permet au code appelant d'indiquer les anciens chemins déjà
+    identifiés comme déplacés/renommés pendant le scan courant. Ces lignes ne
+    doivent pas être supprimées avant la resynchronisation finale.
     """
     deleted_count = 0
+    retained_count = 0
     skipped_count = 0
+    retained_paths_normalized = {
+        str(path).strip().replace("\\", "/")
+        for path in (retained_paths or set())
+        if str(path).strip()
+    }
 
     # Récupérer tous les documents actuellement dans source_document
     all_documents = con.execute(
@@ -1846,6 +1847,11 @@ def _sync_deleted_files(con) -> dict[str, int]:
             skipped_count += 1
             continue
 
+        if doc_path_rel in retained_paths_normalized:
+            retained_count += 1
+            print(f"[RENAME] ancien chemin conservé avant resynchronisation: {doc_path_rel}")
+            continue
+
         # Le fichier n'existe plus: appliquer le traitement de suppression
         print(f"[DELETE] Fichier supprimé détecté: {doc_path_rel}")
 
@@ -1862,6 +1868,7 @@ def _sync_deleted_files(con) -> dict[str, int]:
     con.commit()
     return {
         "deleted": deleted_count,
+        "retained": retained_count,
         "skipped": skipped_count,
     }
 
@@ -1967,15 +1974,6 @@ def main() -> None:
             if _sig:
                 by_signature_doc[_sig] = dict(_row)
 
-        # Synchroniser la suppression/renommage de fichiers EN PREMIER
-        # Cela évite les conversions PDF vers Markdown inutiles pour les fichiers supprimés
-        deletion_result = _sync_deleted_files(con)
-        if deletion_result['deleted'] > 0:
-            print(
-                f"ok: suppression de {deletion_result['deleted']} document(s) supprimé(s) "
-                f"({deletion_result['skipped']} document(s) conservé(s))"
-            )
-
         all_files = sorted(p for p in SOURCES_DIR.rglob("*") if p.is_file())
         md_paths = [p for p in all_files if p.suffix.lower() == ".md"]
         embedded_images = collect_embedded_markdown_images(md_paths)
@@ -1994,6 +1992,7 @@ def main() -> None:
 
         final_entries = []
         invalid_page_sections: list[Path] = []
+        retained_deleted_paths: set[str] = set()
 
         for source_path in sorted(candidate_files, key=lambda p: to_rel(p)):
             # Un Markdown qui définit `source` dans son front matter est un dérivé,
@@ -2035,6 +2034,7 @@ def main() -> None:
                     if old_origine and old_origine != rel_source:
                         # Étape 5: fichier renommé/déplacé — l'`origine` sera corrigée via le replace
                         print(f"[RENAME] déplacement détecté (source): {old_origine!r} → {rel_source!r}")
+                        retained_deleted_paths.add(old_origine.replace("\\", "/"))
                     # Étape 4 ou 5: réutiliser les métadonnées existantes (préserve ocr_status, etc.)
                     source_entry = dict(sig_source_match)
                 else:
@@ -2045,6 +2045,7 @@ def main() -> None:
                         if old_path and old_path != rel_source:
                             # Étape 9: fichier renommé/déplacé — le `path`/`file_name` sera corrigé via le replace
                             print(f"[RENAME] déplacement détecté (source_document): {old_path!r} → {rel_source!r}")
+                            retained_deleted_paths.add(old_path.replace("\\", "/"))
                     # Étape 10: nouveau fichier ou document déplacé → source_entry reste {}, traitement normal
 
             # Charger les métadonnées du front matter Markdown
@@ -2068,7 +2069,22 @@ def main() -> None:
                 period_interest_end_year=INTEREST_PERIOD_END_YEAR,
                 precomputed_signature=file_sig,
             )
-            entry["ner_status"] = 1 if source_path.suffix.lower() == ".md" else 0
+            # Calcul du ner_status :
+            # - fichier non-Markdown → 0 (pas de NER)
+            # - fichier Markdown nouveau ou modifié → 1 (extraction NER à déclencher)
+            # - fichier Markdown inchangé avec NER déjà effectuée → conserver la valeur en base
+            #   (évite de relancer la NER à chaque synchronisation)
+            if source_path.suffix.lower() != ".md":
+                entry["ner_status"] = 0
+            else:
+                existing_ner = source_entry.get("ner_status") if source_entry else None
+                existing_sig = source_entry.get("signature") if source_entry else None
+                file_changed = (not source_entry) or (file_sig != str(existing_sig or ""))
+                if file_changed or existing_ner is None or existing_ner == 1:
+                    entry["ner_status"] = 1
+                else:
+                    # Fichier inchangé et NER déjà traitée : préserver le statut existant
+                    entry["ner_status"] = existing_ner
             entry["ocr_status"] = source_entry.get("ocr_status") if isinstance(source_entry, dict) else None
 
             final_entries.append(entry)
@@ -2084,6 +2100,17 @@ def main() -> None:
                 print(f"  - {to_rel(p)}")
             print("Corriger la structure en sections '## Page X' puis relancer le script.")
             return  # Blocage : table SQLite `source` non mise à jour
+
+        # Identifier les suppressions seulement après avoir repéré les
+        # déplacements/renommages du scan courant, afin de ne pas purger les
+        # lignes dont les métadonnées doivent être réutilisées.
+        deletion_result = _sync_deleted_files(con, retained_paths=retained_deleted_paths)
+        if deletion_result["deleted"] > 0 or deletion_result["retained"] > 0:
+            print(
+                f"ok: suppression de {deletion_result['deleted']} document(s) supprimé(s), "
+                f"{deletion_result['retained']} déplacement(s)/renommage(s) conservé(s) "
+                f"({deletion_result['skipped']} document(s) conservé(s))"
+            )
 
         sync_result = replace_indexed_sources(con, final_entries)
         print(
