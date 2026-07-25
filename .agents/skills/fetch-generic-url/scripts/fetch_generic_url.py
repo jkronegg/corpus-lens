@@ -67,6 +67,27 @@ DOCUMENT_TYPES = {
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".svg"}
 WEBPAGE_DISCOVERY_HINTS = ("seance", "séance", "archive", "conseil", "communal", "asp", "page")
+WINDOWS_MAX_PATH = 260
+WINDOWS_MAX_PATH_MARGIN = 1
+MAX_PATH_COMPONENT_LENGTH = 80
+TRUNCATED_NAME_HASH_LENGTH = 8
+
+
+def _short_hash(value: str, length: int = TRUNCATED_NAME_HASH_LENGTH) -> str:
+    """Return a short deterministic hash for path shortening."""
+    return hashlib.md5((value or "").encode("utf-8")).hexdigest()[:length]
+
+
+def _shorten_path_component(value: str, max_length: int = MAX_PATH_COMPONENT_LENGTH, fallback: str = "document") -> str:
+    """Shorten a single directory/file slug component while preserving uniqueness."""
+    candidate = (value or "").strip(" ._-") or fallback
+    if len(candidate) <= max_length:
+        return candidate
+
+    hash_suffix = f"-{_short_hash(candidate)}"
+    head_length = max(1, max_length - len(hash_suffix))
+    head = candidate[:head_length].rstrip(" ._-") or fallback[:head_length] or fallback
+    return f"{head}{hash_suffix}"
 
 
 def _default_worklist_path(out_dir: Path, document_type: Optional[str], source_url: str = "") -> Path:
@@ -81,9 +102,26 @@ def _default_worklist_path(out_dir: Path, document_type: Optional[str], source_u
     return out_dir / f"worklist_{suffix}_{url_tag}.json"
 
 
-def _default_head_cache_path(out_dir: Path) -> Path:
-    """Return shared persistent HEAD cache path for all worklists in out_dir."""
-    return out_dir / "head_cache_shared.json"
+def _hostname_cache_tag(url: str) -> str:
+    """Return a deterministic cache tag based on URL hostname."""
+    hostname = (urlparse(url).hostname or "").strip().lower()
+    if not hostname:
+        return "unknown-host"
+    # Keep readable host hint + short hash for uniqueness/safe filenames.
+    host_hint = _shorten_path_component(slugify(hostname), max_length=48, fallback="host")
+    host_hash = _short_hash(hostname, length=8)
+    return f"{host_hint}-{host_hash}"
+
+
+def _default_head_cache_path(url: str) -> Path:
+    """Return shared persistent HEAD cache path under `.agents/.cache`.
+
+    Le nom est déterministe et dépend du hostname de l'URL source,
+    afin de conserver le cache même si le dossier de sortie est déplacé.
+    """
+    cache_root = REPO_ROOT / ".agents" / ".cache" / "fetch-generic-url"
+    host_tag = _hostname_cache_tag(url)
+    return cache_root / f"head_cache_shared_{host_tag}.json"
 
 
 def _load_head_cache(cache_path: Path, document_type: str) -> dict[str, bool]:
@@ -154,12 +192,12 @@ def url_storage_subdir(url: str) -> Path:
         normalized = _clean_last_url_segment(segment) if index == len(raw_segments) - 1 else segment
         slug_segment = slugify(normalized)
         if slug_segment:
-            slug_segments.append(slug_segment)
+            slug_segments.append(_shorten_path_component(slug_segment))
 
     if slug_segments:
         return Path(*slug_segments)
 
-    hostname = slugify(parsed.hostname or parsed.netloc or "document")
+    hostname = _shorten_path_component(slugify(parsed.hostname or parsed.netloc or "document"))
     return Path(hostname)
 
 
@@ -170,7 +208,7 @@ def page_storage_slug(url: str, title: str) -> str:
     """
     base = slugify(title or "webpage")
     url_tag = hashlib.md5((url or "").encode()).hexdigest()[:8]
-    return f"{base}_{url_tag}"
+    return _shorten_path_component(f"{base}_{url_tag}", fallback="webpage")
 
 
 def yaml_escape(value: str) -> str:
@@ -400,8 +438,7 @@ def _process_worklist(
     worklist = _load_worklist(worklist_path, "document")
     downloaded_files: list[str] = []
     document_type = str(worklist.get("document_type") or "document")
-    head_cache_path = _default_head_cache_path(output_dir)
-    head_cache = _load_head_cache(head_cache_path, document_type)
+    head_cache_by_host: dict[str, dict[str, bool]] = {}
     worklist["run_status"] = "running"
     worklist.setdefault("worker_pid", None)
     _save_worklist(worklist_path, worklist)
@@ -433,6 +470,12 @@ def _process_worklist(
         _save_worklist(worklist_path, worklist)
 
         if needs_head_check:
+            head_cache_path = _default_head_cache_path(doc_url)
+            host_tag = str(head_cache_path)
+            if host_tag not in head_cache_by_host:
+                head_cache_by_host[host_tag] = _load_head_cache(head_cache_path, document_type)
+            head_cache = head_cache_by_host[host_tag]
+
             if doc_url in head_cache:
                 is_valid = head_cache[doc_url]
                 print(f"[CACHE] HEAD check cached for {doc_url}: {is_valid}")
@@ -532,6 +575,14 @@ def _process_worklist(
     worklist["worker_pid"] = None
     worklist["finished_at"] = _utc_timestamp()
     _save_worklist(worklist_path, worklist)
+
+    temp_download_dir = output_dir / ".tmp_fetch_generic_url"
+    if temp_download_dir.exists():
+        try:
+            shutil.rmtree(temp_download_dir)
+            print(f"[INFO] Répertoire temporaire supprimé : {temp_download_dir}")
+        except Exception as e:
+            print(f"[WARN] Impossible de supprimer le répertoire temporaire {temp_download_dir}: {e}")
 
     return {
         "success": True,
@@ -759,14 +810,76 @@ def _sanitize_filename(filename: str) -> str:
     return safe or "document"
 
 
+def _split_filename_parts(filename: str) -> tuple[str, str]:
+    """Split filename into stem and full suffix (supports names like .tar.gz)."""
+    suffix = "".join(Path(filename).suffixes)
+    stem = filename[:-len(suffix)] if suffix else filename
+    return stem or "document", suffix
+
+
+def _path_length(path: Path) -> int:
+    """Return absolute path length without failing on not-yet-created paths."""
+    try:
+        return len(str(path.resolve()))
+    except OSError:
+        return len(str(path.absolute()))
+
+
+def _fit_filename_to_directory(directory: Path, filename: str, extra_suffix: str = "") -> str:
+    """Shorten filename so the full absolute path stays within Windows MAX_PATH.
+
+    Sous Windows, la limite historique MAX_PATH=260 inclut le caractère NUL
+    terminal. On garde donc une marge d'un caractère pour qu'un chemin écrit
+    par Python reste effectivement ouvrable.
+    """
+    safe_filename = _sanitize_filename(filename)
+    stem, suffix = _split_filename_parts(safe_filename)
+    directory_length = _path_length(directory)
+    separator_length = 0 if str(directory).endswith(("\\", "/")) else 1
+    available_length = WINDOWS_MAX_PATH - WINDOWS_MAX_PATH_MARGIN - directory_length - separator_length
+
+    if available_length <= 0:
+        raise ValueError(f"Output directory path already exceeds Windows limit: {directory}")
+
+    candidate = f"{stem}{extra_suffix}{suffix}"
+    if len(candidate) <= available_length:
+        return candidate
+
+    hash_token = _short_hash(safe_filename)
+    fixed_length = len(extra_suffix) + len(suffix)
+    if fixed_length >= available_length:
+        raise ValueError(
+            "Cannot build a Windows-compatible output filename because the parent directory is too long: "
+            f"{directory}"
+        )
+
+    remaining_length = available_length - fixed_length
+    if remaining_length <= len(hash_token):
+        return f"{hash_token[:remaining_length]}{extra_suffix}{suffix}"
+
+    separator = "-"
+    stem_budget = remaining_length - len(hash_token) - len(separator)
+    truncated_stem = stem[:stem_budget].rstrip(" ._-") if stem_budget > 0 else ""
+
+    if truncated_stem:
+        return f"{truncated_stem}{separator}{hash_token}{extra_suffix}{suffix}"
+    return f"{hash_token}{extra_suffix}{suffix}"
+
+
 def _ensure_unique_path(path: Path) -> Path:
     """Avoid overwriting existing files by appending a numeric suffix."""
-    if not path.exists():
-        return path
+    requested_name = path.name
+    candidate_name = _fit_filename_to_directory(path.parent, requested_name)
+    if candidate_name != requested_name:
+        print(f"[INFO] Filename shortened for Windows path limit: {requested_name} -> {candidate_name}")
+
+    candidate = path.parent / candidate_name
+    if not candidate.exists():
+        return candidate
 
     counter = 1
     while True:
-        candidate = path.with_name(f"{path.stem}-{counter}{path.suffix}")
+        candidate = path.parent / _fit_filename_to_directory(path.parent, requested_name, extra_suffix=f"-{counter}")
         if not candidate.exists():
             return candidate
         counter += 1
@@ -1110,12 +1223,12 @@ def download_image(url: str, images_dir: Path, session: requests.Session) -> Opt
         # Generate filename from URL hash
         url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
         parsed = urlparse(url)
-        filename = Path(parsed.path).name or f"image_{url_hash}.jpg"
-        
+        filename = _sanitize_filename(Path(parsed.path).name or f"image_{url_hash}.jpg")
+
         images_dir.mkdir(parents=True, exist_ok=True)
         
-        filepath = images_dir / filename
-        
+        filepath = _ensure_unique_path(images_dir / filename)
+
         with open(filepath, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
@@ -1382,8 +1495,8 @@ def handle_webpage_without_document_type(url: str, output_dir: Path, follow_link
         # Generate filename
         output_dir.mkdir(parents=True, exist_ok=True)
         md_filename = f"{slugify(page_title)}.md"
-        md_path = output_dir / md_filename
-        
+        md_path = _ensure_unique_path(output_dir / md_filename)
+
         # Add front matter
         front_matter = generate_front_matter(page_title, url, "webpage", date_publication=date_publication)
         full_content = front_matter + markdown_content
@@ -1471,7 +1584,9 @@ def main():
     # Detect content type
     content_type, ext, is_webpage = get_content_type(args.url, session, args.max_redirects)
 
-    if is_webpage and args.document_type:
+    # Ne pas réappliquer la transformation de chemin quand on tourne comme worker :
+    # le chemin final a déjà été transmis via --out-dir par _start_background_worker.
+    if is_webpage and args.document_type and not args.run_worklist_worker:
         out_dir = out_dir / url_storage_subdir(args.url)
     
     if args.dry_run:

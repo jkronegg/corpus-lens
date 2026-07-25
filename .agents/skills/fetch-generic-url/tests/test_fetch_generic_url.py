@@ -62,6 +62,19 @@ class TestUrlStorageSubdir(unittest.TestCase):
         self.assertEqual(result, Path("v1_2") / "archive")
 
 
+class TestHeadCachePath(unittest.TestCase):
+    """Tests for shared HEAD cache location."""
+
+    def test_head_cache_is_stored_under_agents_cache(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_path = dgu._default_head_cache_path(Path(tmpdir))
+
+        expected_root = dgu.REPO_ROOT / ".agents" / ".cache" / "fetch-generic-url"
+        self.assertEqual(cache_path.parent, expected_root)
+        self.assertTrue(cache_path.name.startswith("head_cache_shared_"))
+        self.assertTrue(cache_path.name.endswith(".json"))
+
+
 class TestYamlEscape(unittest.TestCase):
     """Tests for YAML escaping."""
     
@@ -583,6 +596,24 @@ class TestErrorHandling(unittest.TestCase):
             )
             
             self.assertFalse(result)
+
+
+class TestFilenameFromContentDisposition(unittest.TestCase):
+    """Tests for _filename_from_content_disposition helper."""
+
+    def test_extracts_filename_and_repairs_mojibake_embedded_quotes(self) -> None:
+        header = (
+            "attachment;filename=preavis-nÂ°-08-25-\"remuneration-et-indemnites-des-"
+            "membres-du-conseil-communal-et-de-la-municipalite\".pdf"
+        )
+
+        filename = dgu._filename_from_content_disposition(header)
+
+        self.assertEqual(
+            filename,
+            "preavis-n°-08-25-remuneration-et-indemnites-des-membres-du-conseil-"
+            "communal-et-de-la-municipalite.pdf",
+        )
 
 
 class TestIntegration(unittest.TestCase):

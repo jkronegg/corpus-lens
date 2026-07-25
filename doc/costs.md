@@ -20,6 +20,8 @@ Il est intéressant de noter que l'identification des skills est très efficace.
 
 Il n'est donc pas nécessaire de connaître le nom exact des skills.
 
+Afin de diminuer encore les coûts, vous pouvez supprimer les skills que vous n'utilisez jamais.
+
 ## Fetch skills
 
 | Skill | Coût d'exécution via `/skill` (IA credit) | 
