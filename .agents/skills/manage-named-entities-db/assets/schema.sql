@@ -65,8 +65,8 @@ CREATE TABLE IF NOT EXISTS source (
     doi                    TEXT    NOT NULL DEFAULT '',
     url                    TEXT    NOT NULL DEFAULT '',
     langues                TEXT,
-    type_source            TEXT    NOT NULL DEFAULT 'secondaire'
-        CHECK (type_source IN ('primaire', 'secondaire')),
+    type_source            TEXT    NOT NULL DEFAULT 'inconnu'
+        CHECK (type_source IN ('primaire', 'secondaire', 'inconnu')),
     nombre_pages           INTEGER NOT NULL DEFAULT -1,
     categorie              TEXT    NOT NULL DEFAULT 'autre',
     extrait_brut           TEXT    NOT NULL DEFAULT '',
@@ -110,7 +110,8 @@ CREATE TABLE IF NOT EXISTS source_document (
     relative_path TEXT,
     author        TEXT    NOT NULL DEFAULT '',
     ner_status    NUMBER  DEFAULT NULL
-        CHECK (ner_status IN (0, 1, 2))
+        CHECK (ner_status IN (0, 1, 2)),
+    updated_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_source_document_source_id ON source_document(source_id);

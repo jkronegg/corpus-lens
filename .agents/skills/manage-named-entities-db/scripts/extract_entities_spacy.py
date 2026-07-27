@@ -41,7 +41,21 @@ except ImportError:
 
 # Importe le module db pour insertion optionnelle
 sys.path.insert(0, str(Path(__file__).parent))
-from db import add_mention, search_person, source_has_mentions, upsert_person, get_connection, delete_mentions_for_source, update_source_document_ner_status
+from db import (
+    add_mention,
+    delete_mentions_for_source,
+    get_connection,
+    get_source_with_documents_by_path,
+    list_source_documents,
+    search_person,
+    source_has_mentions,
+    update_source_document_ner_status,
+    upsert_person,
+)
+
+
+ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_NER_LOG_FILE = ROOT / "indexation_sources.log"
 
 # ---------------------------------------------------------------------------
 # Configuration spaCy
@@ -755,25 +769,6 @@ def extract_entities_to_db(
     """
     source_name = _resolve_source_name(markdown_file)
 
-    con = get_connection()
-    try:
-        if source_has_mentions(con, source_name) and not reanalyse:
-            _emit(
-                f"[insert] Source déjà traitée, extraction/insert ignorées : {source_name}. "
-                f"Utilisez reanalyse=True pour forcer une nouvelle analyse.",
-                quiet=quiet,
-                log_file=log_file,
-            )
-            return {
-                "action": "skipped",
-                "source": source_name,
-                "reason": "already_processed",
-                "inserted": 0,
-                "deleted_mentions": 0,
-            }
-    finally:
-        con.close()
-
     result = extract_entities(
         markdown_file,
         lang=lang,
@@ -836,21 +831,24 @@ def extract_entities_to_db(
                     log_file=log_file,
                 )
         
-        # Mettre à jour le statut NER à 2 si des mentions ont été insérées
-        if inserted > 0:
-            ner_status_result = update_source_document_ner_status(con, source_name, 2)
-            if ner_status_result["action"] == "updated":
-                _emit(
-                    f"[insert] Statut NER du document mis à jour à 2 (avec mentions) : {source_name}",
-                    quiet=quiet,
-                    log_file=log_file,
-                )
-            elif ner_status_result["action"] == "error":
-                _emit(
-                    f"[insert][WARN] Erreur lors de la mise à jour du statut NER : {ner_status_result['reason']}",
-                    quiet=quiet,
-                    log_file=log_file,
-                )
+        # Le document est considéré traité même sans mention détectée.
+        ner_status_result = update_source_document_ner_status(con, source_name, 2)
+        if ner_status_result["action"] == "updated":
+            if inserted > 0:
+                status_message = "avec mentions"
+            else:
+                status_message = "sans mention"
+            _emit(
+                f"[insert] Statut NER du document mis à jour à 2 ({status_message}) : {source_name}",
+                quiet=quiet,
+                log_file=log_file,
+            )
+        elif ner_status_result["action"] == "error":
+            _emit(
+                f"[insert][WARN] Erreur lors de la mise à jour du statut NER : {ner_status_result['reason']}",
+                quiet=quiet,
+                log_file=log_file,
+            )
     finally:
         con.close()
 
@@ -871,12 +869,130 @@ def extract_entities_to_db(
     }
 
 
+def _print_progress_bar(current: int, total: int, label: str = "") -> None:
+    if total <= 0:
+        return
+    width = 30
+    ratio = current / total
+    filled = int(width * ratio)
+    bar = "#" * filled + "-" * (width - filled)
+    suffix = f" {label}" if label else ""
+    end = "\n" if current >= total else "\r"
+    print(f"[NER] |{bar}| {current:>3}/{total:<3}{suffix}", end=end, flush=True)
+
+
+def _collect_batch_candidates(con, *, root_dir: Path) -> list[Path]:
+    """Retourne les documents Markdown candidats a la NER (ner_status=1)."""
+    candidates = list_source_documents(con, ner_status=1, limit=1_000_000)
+    doc_paths: list[Path] = []
+    for document in candidates:
+        raw_path = str(document.get("path") or "").strip()
+        if not raw_path:
+            continue
+
+        doc_path = Path(raw_path)
+        if not doc_path.is_absolute():
+            doc_path = (root_dir / doc_path).resolve()
+
+        if doc_path.suffix.lower() != ".md":
+            continue
+        if not doc_path.exists():
+            continue
+
+        parent_doc_id = document.get("parent_doc_id")
+        if parent_doc_id is not None:
+            source_row = get_source_with_documents_by_path(con, raw_path)
+            if source_row is None:
+                continue
+            parent_path = str(source_row.get("source_origine") or source_row.get("origine") or "").strip()
+            if parent_path.lower().endswith(".pdf") and str(source_row.get("ocr_status") or "") != "D":
+                continue
+
+        doc_paths.append(doc_path)
+
+    return doc_paths
+
+
+def run_named_entities_extraction_batch_from_db(
+    *,
+    con=None,
+    root_dir: Path | None = None,
+    log_file: str | Path | None = DEFAULT_NER_LOG_FILE,
+    reanalyse: bool = False,
+    quiet: bool = False,
+    extractor_func=None,
+) -> dict:
+    """Execute la NER pour tous les source_document dont ner_status=1."""
+    owns_connection = con is None
+    if con is None:
+        con = get_connection()
+
+    try:
+        effective_root = root_dir or ROOT
+        doc_paths = _collect_batch_candidates(con, root_dir=effective_root)
+        total = len(doc_paths)
+        if total == 0:
+            _emit("[NER] Aucun document Markdown candidat.", quiet=quiet, log_file=log_file)
+            return {"action": "noop", "total": 0, "processed": 0, "succeeded": 0, "failed": 0}
+
+        if extractor_func is None:
+            extractor_func = extract_entities_to_db
+
+        succeeded = 0
+        failed = 0
+        if not quiet:
+            _print_progress_bar(0, total, label="preparation")
+
+        for idx, doc_path in enumerate(doc_paths, start=1):
+            label = doc_path.name[:24]
+            try:
+                result = extractor_func(
+                    str(doc_path),
+                    lang="fr",
+                    min_confidence=0.0,
+                    reanalyse=reanalyse,
+                    quiet=True,
+                    log_file=log_file,
+                )
+                if str(result.get("action") or "") in {"inserted", "skipped"}:
+                    succeeded += 1
+                else:
+                    failed += 1
+                    _emit(
+                        f"[WARN] extraction NER inattendue pour {doc_path}: {result}",
+                        quiet=quiet,
+                        log_file=log_file,
+                    )
+            except Exception as exc:
+                failed += 1
+                _emit(
+                    f"[WARN] extraction NER echouee pour {doc_path} (erreur: {exc})",
+                    quiet=quiet,
+                    log_file=log_file,
+                )
+
+            if not quiet:
+                _print_progress_bar(idx, total, label=label)
+
+        return {
+            "action": "completed",
+            "total": total,
+            "processed": total,
+            "succeeded": succeeded,
+            "failed": failed,
+        }
+    finally:
+        if owns_connection:
+            con.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Extrait les entités nommées (personnes) d'un fichier Markdown avec spaCy.",
     )
     parser.add_argument(
         "markdown_file",
+        nargs="?",
         help="Chemin du fichier Markdown à analyser",
     )
     parser.add_argument(
@@ -902,9 +1018,20 @@ def main() -> None:
         help="Insère les mentions détectées dans la base de données SQLite",
     )
     parser.add_argument(
+        "--batch-from-db",
+        action="store_true",
+        help="Traite en batch tous les documents source_document avec ner_status=1",
+    )
+    parser.add_argument(
         "--reanalyse",
         action="store_true",
         help="Force une nouvelle analyse NER même si la source a déjà des mentions (à utiliser avec --insert)",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=DEFAULT_NER_LOG_FILE,
+        help="Fichier de log NER global",
     )
     parser.add_argument(
         "--output",
@@ -913,6 +1040,23 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    if args.batch_from_db:
+        if args.markdown_file:
+            parser.error("Ne pas fournir markdown_file avec --batch-from-db")
+        batch_result = run_named_entities_extraction_batch_from_db(
+            log_file=args.log_file,
+            reanalyse=args.reanalyse,
+        )
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            with open(args.output, "w", encoding="utf-8") as f:
+                json.dump(batch_result, f, ensure_ascii=False, indent=2)
+            print(f"[export] Résultat sauvegardé : {args.output}")
+        return
+
+    if not args.markdown_file:
+        parser.error("markdown_file est requis sauf avec --batch-from-db")
 
     source_name: str | None = None
 

@@ -97,6 +97,21 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
                 "ALTER TABLE source_document "
                 "ADD COLUMN parent_doc_id INTEGER REFERENCES source_document(id) ON DELETE SET NULL"
             )
+            source_document_columns = {
+                row[1] for row in con.execute("PRAGMA table_info(source_document)")
+            }
+        if "updated_at" not in source_document_columns:
+            con.execute(
+                "ALTER TABLE source_document "
+                "ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''"
+            )
+            con.execute(
+                "UPDATE source_document SET updated_at = ? WHERE updated_at IS NULL OR trim(updated_at) = ''",
+                (_now_iso(),),
+            )
+            source_document_columns = {
+                row[1] for row in con.execute("PRAGMA table_info(source_document)")
+            }
 
         # Migration schéma: suppression de la colonne legacy `document_kind`.
         if "document_kind" in source_document_columns:
@@ -118,11 +133,12 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
                     relative_path TEXT,
                     author        TEXT    NOT NULL DEFAULT '',
                     ner_status    NUMBER  DEFAULT NULL
-                        CHECK (ner_status IN (0, 1, 2))
+                        CHECK (ner_status IN (0, 1, 2)),
+                    updated_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
                 );
 
-                INSERT INTO source_document_new (id, source_id, parent_doc_id, path, signature, file_name, relative_path, author, ner_status)
-                SELECT id, source_id, parent_doc_id, path, signature, file_name, relative_path, author, ner_status
+                INSERT INTO source_document_new (id, source_id, parent_doc_id, path, signature, file_name, relative_path, author, ner_status, updated_at)
+                SELECT id, source_id, parent_doc_id, path, signature, file_name, relative_path, author, ner_status, updated_at
                 FROM source_document;
 
                 DROP TABLE source_document;
@@ -166,6 +182,101 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
                 "ELSE 'N' END "
                 "WHERE ocr_status IS NULL OR ocr_status = ''"
             )
+
+        # Migration schéma: type_source accepte désormais 'inconnu' et devient la valeur par défaut.
+        source_table_sql_row = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'source'"
+        ).fetchone()
+        source_table_sql = (source_table_sql_row[0] if source_table_sql_row and source_table_sql_row[0] else "").lower()
+        needs_type_source_migration = (
+            "default 'secondaire'" in source_table_sql
+            or "check (type_source in ('primaire', 'secondaire'))" in source_table_sql
+        )
+
+        if needs_type_source_migration:
+            foreign_keys_was_on = con.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+            if foreign_keys_was_on:
+                con.execute("PRAGMA foreign_keys = OFF")
+
+            type_source_expr = (
+                "CASE "
+                "WHEN lower(trim(type_source)) IN ('primaire', 'secondaire', 'inconnu') THEN lower(trim(type_source)) "
+                "ELSE 'inconnu' END"
+                if "type_source" in source_columns
+                else "'inconnu'"
+            )
+
+            con.executescript(
+                f"""
+                CREATE TABLE source_new (
+                    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+                    signature              TEXT    NOT NULL UNIQUE,
+                    identifiant_source     TEXT    NOT NULL UNIQUE,
+                    titre                  TEXT    NOT NULL,
+                    date_publication       TEXT    NOT NULL DEFAULT '0000-00-00',
+                    date_consultation      TEXT    NOT NULL DEFAULT '0000-00-00',
+                    origine                TEXT    NOT NULL UNIQUE,
+                    auteurs_json           TEXT    NOT NULL DEFAULT '[]'
+                        CHECK (json_valid(auteurs_json)),
+                    periodes_json          TEXT    NOT NULL DEFAULT '[]'
+                        CHECK (json_valid(periodes_json)),
+                    isbn                   TEXT    NOT NULL DEFAULT '',
+                    issn                   TEXT    NOT NULL DEFAULT '',
+                    doi                    TEXT    NOT NULL DEFAULT '',
+                    url                    TEXT    NOT NULL DEFAULT '',
+                    langues                TEXT,
+                    type_source            TEXT    NOT NULL DEFAULT 'inconnu'
+                        CHECK (type_source IN ('primaire', 'secondaire', 'inconnu')),
+                    nombre_pages           INTEGER NOT NULL DEFAULT -1,
+                    categorie              TEXT    NOT NULL DEFAULT 'autre',
+                    extrait_brut           TEXT    NOT NULL DEFAULT '',
+                    resume                 TEXT    NOT NULL DEFAULT '',
+                    ocr_status             TEXT    NOT NULL DEFAULT 'N'
+                        CHECK (ocr_status IN ('P', 'T', 'D', 'F', 'N')),
+                    created_at             TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                    updated_at             TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                );
+
+                INSERT INTO source_new (
+                    id, signature, identifiant_source, titre,
+                    date_publication, date_consultation, origine,
+                    auteurs_json, periodes_json, isbn, issn, doi, url,
+                    langues, type_source, nombre_pages,
+                    categorie, extrait_brut, resume, ocr_status,
+                    created_at, updated_at
+                )
+                SELECT
+                    id,
+                    signature,
+                    identifiant_source,
+                    titre,
+                    date_publication,
+                    date_consultation,
+                    origine,
+                    auteurs_json,
+                    periodes_json,
+                    isbn,
+                    issn,
+                    doi,
+                    url,
+                    langues,
+                    {type_source_expr},
+                    nombre_pages,
+                    categorie,
+                    extrait_brut,
+                    resume,
+                    COALESCE(NULLIF(ocr_status, ''), 'N'),
+                    created_at,
+                    updated_at
+                FROM source;
+
+                DROP TABLE source;
+                ALTER TABLE source_new RENAME TO source;
+                """
+            )
+
+            if foreign_keys_was_on:
+                con.execute("PRAGMA foreign_keys = ON")
 
     schema_sql = DEFAULT_SCHEMA.read_text(encoding="utf-8")
     con.executescript(schema_sql)
@@ -298,7 +409,7 @@ def _normalize_source_entry(entry: dict) -> dict:
         "DOI": str(entry.get("DOI") or "").strip(),
         "URL": str(entry.get("URL") or entry.get("url") or "").strip(),
         "langues": entry.get("langues"),
-        "type_source": str(entry.get("type_source") or "secondaire").strip() or "secondaire",
+        "type_source": str(entry.get("type_source") or "inconnu").strip() or "inconnu",
         "nombre_pages": int(entry.get("nombre_pages", -1) if entry.get("nombre_pages") is not None else -1),
         "categorie": str(entry.get("categorie") or "autre").strip() or "autre",
         "extrait_brut": str(entry.get("extrait_brut") or ""),
@@ -430,6 +541,7 @@ def list_source_documents(
             sd.relative_path,
             sd.author,
             sd.ner_status,
+            sd.updated_at,
             s.signature,
             s.identifiant_source,
             s.titre
@@ -494,7 +606,8 @@ def get_source_with_documents_by_path(con: sqlite3.Connection, path: str) -> Opt
             sd.signature AS document_signature,
             sd.file_name AS document_file_name, sd.relative_path AS document_relative_path,
             sd.author AS document_author, sd.ner_status AS document_ner_status,
-            sd.parent_doc_id AS document_parent_doc_id
+            sd.parent_doc_id AS document_parent_doc_id,
+            sd.updated_at AS document_updated_at
         FROM source_document sd
         JOIN source s ON s.id = sd.source_id
         WHERE sd.path = ?
@@ -572,6 +685,7 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
     parent_path = entry["parent_path"]
     effective_ocr_status = entry["ocr_status"] or _default_ocr_status_for_path(path)
     document_signature = entry["document_signature"] or _compute_document_signature_from_repo_path(path)
+    now = _now_iso()
 
     if not path:
         return {"action": "error", "reason": "Champ manquant: path/origine", "source_id": None}
@@ -607,8 +721,8 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
                 cur = con.execute(
                     """
                     INSERT INTO source_document
-                        (source_id, path, signature, file_name, relative_path, author, parent_doc_id, ner_status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        (source_id, path, signature, file_name, relative_path, author, parent_doc_id, ner_status, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         source_id,
@@ -619,6 +733,7 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
                         entry["author"],
                         parent_doc_id,
                         entry["ner_status"],
+                        now,
                     ),
                 )
                 document_id = cur.lastrowid
@@ -634,7 +749,8 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
                         relative_path = ?,
                         author = ?,
                         parent_doc_id = ?,
-                        ner_status = ?
+                        ner_status = ?,
+                        updated_at = ?
                     WHERE id = ?
                     """,
                     (
@@ -645,6 +761,7 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
                         entry["author"],
                         parent_doc_id,
                         entry["ner_status"],
+                        now,
                         document_id,
                     ),
                 )
@@ -669,7 +786,6 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
             "source_id": None,
         }
 
-    now = _now_iso()
     # TODO c'est un peu compliqué d'avoir trois identifiants pour la source => à simplifier
     with con:
         existing = con.execute(
@@ -784,8 +900,8 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
             cur_doc = con.execute(
                 """
                 INSERT INTO source_document
-                    (source_id, path, signature, file_name, relative_path, author, parent_doc_id, ner_status)
-                VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
+                    (source_id, path, signature, file_name, relative_path, author, parent_doc_id, ner_status, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
                 """,
                 (
                     source_id,
@@ -795,6 +911,7 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
                     entry["relative_path"],
                     entry["author"],
                     entry["ner_status"],
+                    now,
                 ),
             )
             document_id = cur_doc.lastrowid
@@ -809,7 +926,8 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
                     relative_path = ?,
                     author = ?,
                     parent_doc_id = NULL,
-                    ner_status = ?
+                    ner_status = ?,
+                    updated_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -819,6 +937,7 @@ def upsert_source(con: sqlite3.Connection, source: dict) -> dict:
                     entry["relative_path"],
                     entry["author"],
                     entry["ner_status"],
+                    now,
                     document_id,
                 ),
             )
@@ -843,7 +962,7 @@ def register_source_document(
     issn: str = "",
     doi: str = "",
     langues: str | None = None,
-    type_source: str = "secondaire",
+    type_source: str = "inconnu",
     nombre_pages: int = -1,
     categorie: str = "autre",
     extrait_brut: str = "",
@@ -1017,8 +1136,8 @@ def replace_sources(con: sqlite3.Connection, sources: list[dict]) -> dict:
             con.execute(
                 """
                 INSERT INTO source_document
-                    (source_id, path, signature, file_name, relative_path, author, parent_doc_id, ner_status)
-                VALUES (?, ?, ?, ?, '.', '', NULL, ?)
+                    (source_id, path, signature, file_name, relative_path, author, parent_doc_id, ner_status, updated_at)
+                VALUES (?, ?, ?, ?, '.', '', NULL, ?, ?)
                 """,
                 (
                     source_id,
@@ -1026,6 +1145,7 @@ def replace_sources(con: sqlite3.Connection, sources: list[dict]) -> dict:
                     entry.get("document_signature") or _compute_document_signature_from_repo_path(origin_path),
                     Path(origin_path).name,
                     entry["ner_status"],
+                    now,
                 ),
             )
             documents_count += 1
