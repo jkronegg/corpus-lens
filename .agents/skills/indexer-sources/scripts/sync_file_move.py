@@ -46,21 +46,27 @@ def manage_moved_file(
         )
         source_document_found = source_cursor.fetchone()[0] > 0
 
-        source_cursor = con.execute(
-            "UPDATE source "
-            "SET origine = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
-            "WHERE signature = ? AND origine != ?",
-            (normalized_path, normalized_signature, normalized_path),
-        )
-        corrected_source = source_cursor.rowcount > 0
+        if source_found:
+            source_cursor = con.execute(
+                "UPDATE source "
+                "SET origine = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+                "WHERE signature = ? AND origine != ?",
+                (normalized_path, normalized_signature, normalized_path),
+            )
+            corrected_source = source_cursor.rowcount > 0
+        else:
+            corrected_source = False
 
-        source_document_cursor = con.execute(
-            "UPDATE source_document "
-            "SET path = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
-            "WHERE signature = ? AND path != ?",
-            (normalized_path, normalized_signature, normalized_path),
-        )
-        corrected_source_document = source_document_cursor.rowcount > 0
+        if source_document_found:
+            source_document_cursor = con.execute(
+                "UPDATE source_document "
+                "SET path = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+                "WHERE signature = ? AND path != ?",
+                (normalized_path, normalized_signature, normalized_path),
+            )
+            corrected_source_document = source_document_cursor.rowcount > 0
+        else:
+            corrected_source_document = False
 
     if corrected_source:
         logger(f"[RENAME] correction source via signature: {normalized_path!r}")

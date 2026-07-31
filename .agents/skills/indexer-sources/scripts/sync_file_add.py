@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from datetime import datetime, timezone
 
@@ -822,7 +823,65 @@ def markdown_references_image(md_path: Path, image_path: Path) -> bool:
     return False
 
 
-def resolve_parent_doc_id_for_image(con, image_path: Path) -> tuple[int, int] | None:
+# Cache process-wide pour accélérer la résolution parent des images.
+# key: md absolute path -> (set des refs images relatives normalisées, (source_document.id, source_id) | None)
+_MD_IMAGE_PARENT_CACHE: dict[str, tuple[set[str], tuple[int, int] | None]] = {}
+
+
+def _normalize_md_asset_ref(raw_ref: str) -> str:
+    ref = (raw_ref or "").strip()
+    ref = ref.split("#", 1)[0].split("?", 1)[0].strip()
+    if not ref:
+        return ""
+    ref = ref.replace("\\", "/")
+    parts = [part for part in ref.split("/") if part and part != "."]
+    if not parts:
+        return ""
+    normalized = "/".join(parts)
+    return normalized
+
+
+def _relative_image_ref_from_md(md_path: Path, image_path: Path) -> str:
+    """Construit la référence relative attendue depuis `md_path` vers `image_path`."""
+    try:
+        rel = os.path.relpath(str(image_path.resolve()), str(md_path.parent.resolve()))
+    except OSError:
+        rel = image_path.name
+    return _normalize_md_asset_ref(rel)
+
+
+def _load_md_image_parent_cache_entry(con, md_path: Path) -> tuple[set[str], tuple[int, int] | None]:
+    md_abs = str(md_path.resolve())
+    cached = _MD_IMAGE_PARENT_CACHE.get(md_abs)
+    if cached is not None:
+        return cached
+
+    image_refs: set[str] = set()
+    if md_path.exists() and md_path.suffix.lower() == ".md":
+        content = md_path.read_text(encoding="utf-8", errors="replace")
+        for raw_ref in _extract_markdown_asset_refs(content):
+            if not _is_local_markdown_asset(raw_ref):
+                continue
+            normalized = _normalize_md_asset_ref(raw_ref)
+            if not normalized:
+                continue
+            ext = Path(normalized).suffix.lower()
+            if ext in IMAGE_EXTENSIONS:
+                image_refs.add(normalized)
+
+    rel_md = to_rel(md_path)
+    row = con.execute(
+        "SELECT id, source_id FROM source_document WHERE path = ? ORDER BY id LIMIT 1",
+        (rel_md,),
+    ).fetchone()
+    doc_row = (int(row[0]), int(row[1])) if row else None
+
+    cached_value = (image_refs, doc_row)
+    _MD_IMAGE_PARENT_CACHE[md_abs] = cached_value
+    return cached_value
+
+
+def resolve_parent_doc_id_for_image(con, image_path: Path) -> tuple[None, None] | tuple[int, int]:
     """Retourne l'id et le source_id de `source_document` du Markdown qui référence cette image."""
     if image_path.suffix.lower() not in IMAGE_EXTENSIONS:
         return None, None
@@ -840,6 +899,11 @@ def resolve_parent_doc_id_for_image(con, image_path: Path) -> tuple[int, int] | 
         base = parent_name[:-len("_ocr_images")]
         ocr_parent_md = image_path.parent.parent / f"{base}.md"
         if ocr_parent_md.exists():
+            # Fast path majoritaire: on évite le scan global et les relectures markdown.
+            expected_ref = _relative_image_ref_from_md(ocr_parent_md, image_path)
+            image_refs, doc_row = _load_md_image_parent_cache_entry(con, ocr_parent_md)
+            if expected_ref and expected_ref in image_refs and doc_row:
+                return doc_row
             candidates.append(ocr_parent_md)
 
     # Heuristique 3: markdowns proches du fichier image
@@ -861,15 +925,18 @@ def resolve_parent_doc_id_for_image(con, image_path: Path) -> tuple[int, int] | 
         unique_candidates.append(md_path)
 
     for md_path in unique_candidates:
-        if not markdown_references_image(md_path, image_path):
+        expected_ref = _relative_image_ref_from_md(md_path, image_path)
+        image_refs, doc_row = _load_md_image_parent_cache_entry(con, md_path)
+
+        if expected_ref and expected_ref in image_refs:
+            if doc_row:
+                return doc_row
             continue
-        rel_md = to_rel(md_path)
-        row = con.execute(
-            "SELECT id, source_id FROM source_document WHERE path = ? ORDER BY id LIMIT 1",
-            (rel_md,),
-        ).fetchone()
-        if row:
-            return int(row[0]), int(row[1])
+
+        # Fallback de compatibilité pour des liens non standard (p.ex. chemins absolus).
+        if markdown_references_image(md_path, image_path) and doc_row:
+            return doc_row
+
     return None, None
 
 
@@ -1413,6 +1480,28 @@ def pdf_page_count(pdf_path: Path) -> int:
     return count if count > 0 else -1
 
 
+def resolve_source_id_by_signature(con, source_signature) -> int | None:
+    """Résout le source_id à partir d'une valeur `source_signature` issue du front matter YAML.
+
+    `source_signature` : est la signature MD5 du fichier source
+
+    Retourne l'id de la ligne `source` correspondante, ou ``None`` si aucune
+    correspondance n'est trouvée.
+    """
+    if not source_signature:
+        # TODO trouver un plan B s'il n'y a pas de signature (p.ex. même fichier dans le répertoire courant, mais avec l'extension PDF)
+        return None
+
+    # 1) Correspondance exacte sur `source.origine`
+    row = con.execute(
+        "SELECT id FROM source WHERE signature = ? ORDER BY id LIMIT 1",
+        (str(source_signature).strip(),),
+    ).fetchone()
+    if row:
+        return int(row[0])
+
+    return None
+
 
 def add_file(
     con,
@@ -1431,7 +1520,7 @@ def add_file(
     known_authors = load_known_authors(AUTHORS_PATH)
 
     path = to_rel(source_path)
-    identifiant_source = source_key_from_path(source_path)
+    identifiant_source = source_key_from_path(source_path) # FIXME s'assuer que l'identifiant métier est unique
     ner_status = 0 # par défaut, pas de reconnaissance des named entities
     ocr_status = 'N' # par défaut, pas de reconnaissance OCR
     page_count = -1
@@ -1467,17 +1556,20 @@ def add_file(
     # il ne crée pas d'entrée source principale.
     if source_path.suffix.lower() == ".md":
         source_fields = _parse_front_matter_fields(source_path)
-        source_value = source_fields.get("source")
-        if isinstance(source_value, str) and source_value.strip():
-            return None
+        source_signature = source_fields.get("source_signature")
+        source_id = resolve_source_id_by_signature(con, source_signature)
+        if source_id is not None and source_signature:
+            con.execute(
+                "UPDATE source SET ocr_status = 'D' WHERE signature = ?",
+                (str(source_signature).strip(),),
+            )
 
         # Contrainte obligatoire: sections `Page X` sur les Markdown analytiques.
-        if source_path.exists():
-            normalize_md_page_sections(source_path)
-            if not has_valid_page_sections(source_path):
-                # Repli pour les Markdown sans pagination explicite (ex: notices DHS natives).
-                if not (ensure_single_page_section(source_path) and has_valid_page_sections(source_path)):
-                    print(f"[WARN] sections de page invalides détectées dans {source_path}")
+        normalize_md_page_sections(source_path)
+        if not has_valid_page_sections(source_path):
+            # Repli pour les Markdown sans pagination explicite (ex: notices DHS natives).
+            if not (ensure_single_page_section(source_path) and has_valid_page_sections(source_path)):
+                print(f"[WARN] sections de page invalides détectées dans {source_path}")
 
         page_count, excerpt, is_readable = md_stats(source_path)
         langues_value = markdown_language_distribution(source_path)

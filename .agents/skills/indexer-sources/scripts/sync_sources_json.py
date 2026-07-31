@@ -13,17 +13,17 @@ SOURCES_DIR = ROOT / "sources"
 IGNORED_FILENAMES = {
     "auteurs.json"
 }
-LOCK_FILE_PREFIXES = ("~$",)
+IGNORED_SUFFIXES = (".log",)
+IGNORED_PREFIXES = ("~$", # lock file prefix for Office documents
+                    "worklist_pdf_", # log file skill extract-pdf-to-md
+                    )
 
 NAMED_ENTITIES_DB_SCRIPTS_DIR = (
     ROOT / ".agents" / "skills" / "manage-named-entities-db" / "scripts"
 )
 if str(NAMED_ENTITIES_DB_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(NAMED_ENTITIES_DB_SCRIPTS_DIR))
-from db import (
-    get_connection,
-    _ensure_schema
-)
+from db import get_connection
 
 NER_EXTRACT_SCRIPT = (
     ROOT
@@ -150,15 +150,27 @@ def main() -> None:
         for file_path in all_files:
             if file_path.name in IGNORED_FILENAMES:
                 continue
-            if file_path.name.startswith(LOCK_FILE_PREFIXES):
+            if file_path.name.startswith(IGNORED_PREFIXES):
+                continue
+            if file_path.name.endswith(IGNORED_SUFFIXES):
                 continue
             candidate_files.append(file_path)
+        # Les fichiers Markdown/HTML sont traités en premier afin que les images
+        # qu'ils référencent soient reconnues comme enfants (source_document) et
+        # non comme sources indépendantes lors de leur propre traitement.
+        candidate_files.sort(
+            key=lambda p: (
+                0 if p.suffix.lower() in {".pdf", ".xlsx"} else
+                1 if p.suffix.lower() in {".md", ".html", ".htm"} else
+                2,
+                to_rel(p))
+        )
         seen_signatures: set[str] = set() # ensemble de toutes les signatures des fichiers du répertoire `sources`, à l'exception des fichiers ignorés
 
         # 3) Pour chaque fichier: MD5 + détection déplacement/ajout.
         con = get_connection()
-        _ensure_schema(con)
-        for source_path in sorted(candidate_files, key=lambda p: to_rel(p)):
+        for source_path in candidate_files:
+
             rel_path = to_rel(source_path)
 
             # Étape 1: calculer la signature du fichier (base de la détection de renommage/déplacement)
