@@ -27,6 +27,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
     pd = None
 
 
+
 SKILL_NAME = "extract-pdf-to-md"
 
 _ROOT = Path(__file__).resolve().parents[4]
@@ -34,6 +35,15 @@ _DETECT_LANG_PATH = _ROOT / ".agents" / "skills" / "translate-markdown" / "scrip
 _TRANSLATE_MD_PATH = _ROOT / ".agents" / "skills" / "translate-markdown" / "scripts" / "translate_markdown.py"
 _DB_MODULE_PATH = _ROOT / ".agents" / "skills" / "manage-named-entities-db" / "scripts" / "db.py"
 _MISTRAL_OCR_PATH = _ROOT / ".agents" / "skills" / "extract-pdf-to-md" / "scripts" / "mistral_ocr.py"
+
+
+_INDEXER_SOURCES_SCRIPTS_DIR = (
+        _ROOT / ".agents" / "skills" / "indexer-sources" / "scripts"
+)
+if str(_INDEXER_SOURCES_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_INDEXER_SOURCES_SCRIPTS_DIR))
+from corpus_lens_files import md5_file, to_rel
+
 _FR_TRANSLATION_THRESHOLD = 80
 _OCR_ENGINE = None
 _OCR_ENABLED = fitz is not None and RapidOCR is not None
@@ -1342,6 +1352,7 @@ class FrontMatter:
     FIELD_ORDER = [
         "titre",
         "source",
+        "source_signature",
         "date_publication",
         "date_event",
         "date_extraction",
@@ -1896,9 +1907,16 @@ def _build_pdf_frontmatter(
     date_event: str = "",
 ) -> str:
     title = _norm_ws(pdf_path.stem.replace("_", " "))
+    source_signature = ""
+    try:
+        source_signature = md5_file(pdf_path)
+    except Exception:
+        source_signature = ""
+
     meta = {
         "titre": title,
-        "source": str(pdf_path),
+        "source": str(to_rel(pdf_path)),
+        "source_signature": source_signature,
         "date_publication": date_publication,
         "date_event": date_event,
         "date_extraction": datetime.now().isoformat(),
