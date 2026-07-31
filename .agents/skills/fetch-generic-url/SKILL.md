@@ -18,16 +18,12 @@ search_hints:
 
 # Fetch Generic URL
 
-Télécharge des documents depuis des URLs génériques et les enregistre dans `sources/` avec synchronisation automatique à la base de données `named_entities.sqlite`.
+Télécharge des documents depuis des URLs génériques et les enregistre dans `sources/` avec synchronisation automatique à la base de données `../../../named_entities.sqlite.bak`.
 
 ## Inputs
 
 - `--url` (obligatoire): URL cible à télécharger (document direct ou webpage).
 - `--document-type` (optionnel): Type de document attendu ("pdf", "html", "docx", etc.). Si fourni, recherche les liens correspondants dans la page.
-- `--out-dir` (optionnel): Dossier de sortie (défaut: `sources/generic-urls`).
-- `--dry-run` (optionnel): Valide l'URL et détecte le type de contenu sans télécharger.
-- `--max-redirects` (optionnel): Nombre maximum de redirects à suivre (défaut: 3).
-- `--follow-links` (optionnel): Si true et aucun document_type, récupère également les ressources liées (images).
 
 ## Outputs
 
@@ -54,7 +50,7 @@ python -u ".agents/skills/fetch-generic-url/scripts/fetch_generic_url.py" --url 
 
 ### Télécharger une webpage en Markdown
 ```powershell
-python -u ".agents/skills/fetch-generic-url/scripts/fetch_generic_url.py" --url "https://example.com/article" --follow-links
+python -u ".agents/skills/fetch-generic-url/scripts/fetch_generic_url.py" --url "https://example.com/article"
 ```
 
 ### Chercher et télécharger des PDFs dans une webpage
@@ -62,17 +58,11 @@ python -u ".agents/skills/fetch-generic-url/scripts/fetch_generic_url.py" --url 
 python -u ".agents/skills/fetch-generic-url/scripts/fetch_generic_url.py" --url "https://example.com/documents" --document-type pdf
 ```
 
-### Valider une URL (dry-run)
-```powershell
-python -u ".agents/skills/fetch-generic-url/scripts/fetch_generic_url.py" --url "https://example.com/article" --dry-run
-```
-
 ## Comportement
 
 ### 1. Détection du type de contenu
 - Suit les redirects HTTP (max 3 hops par défaut)
 - Détermine le MIME type à partir du header Content-Type ou de l'extension du fichier
-- Valide l'accessibilité et la taille du fichier
 
 ### 2. Si URL est un document direct
 - Télécharge le fichier binaire vers `sources/generic-urls/`
@@ -92,16 +82,12 @@ python -u ".agents/skills/fetch-generic-url/scripts/fetch_generic_url.py" --url 
 - Crée des relations parent/child dans la base de données
 
 ### 5. Gestion des images
-- Téléchargées uniquement si `--follow-links` ou quand convertissant une webpage
+- Téléchargées automatiquement quand convertissant une webpage
 - Stockées dans `sources/generic-urls/<slug_document>/images/`
 - Nommées via hash MD5 du URL pour éviter les doublons
 - Enregistrées comme `source_document` avec `parent_doc_id`
 
 ## Notes
 
-- Utilise Playwright en mode CDP (Chrome DevTools Protocol) pour les webpages interactives
-- Respecte les conventions du projet: MD5 pour `signature`, accents français
-- Front matter YAML obligatoire pour tous les Markdown générés (incluant `date_publication` et `date_consultation`)
-- Suit automatiquement max 3 redirects HTTP (configurable via `--max-redirects`)
-- Les images sont liées aux documents parents via `parent_doc_id` dans la DB
-
+- Fais un résumé concis des actions effectuées, sans proposer d'actions supplémentaires.
+- Si un problème survient ou s'il faut modifier le comportement du skill, regarde les instructions dans [debug.md](debug.md)

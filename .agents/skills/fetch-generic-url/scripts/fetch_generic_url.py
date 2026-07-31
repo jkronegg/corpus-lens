@@ -297,7 +297,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR, help="Dossier de sortie")
     parser.add_argument("--dry-run", action="store_true", help="Valide l'URL sans télécharger")
     parser.add_argument("--max-redirects", type=int, default=DEFAULT_MAX_REDIRECTS, help="Max redirects à suivre")
-    parser.add_argument("--follow-links", action="store_true", help="Télécharge les ressources liées (images)")
     parser.add_argument("--background-download", action=argparse.BooleanOptionalAction, default=True, help="Crée/alimente la file de travail puis lance le téléchargement en tâche de fond (actif par défaut; --no-background-download pour désactiver)")
     parser.add_argument("--worklist-file", type=Path, help="Fichier JSON de suivi des téléchargements (reprenable)")
     parser.add_argument("--max-download-attempts", type=int, default=DEFAULT_MAX_DOWNLOAD_ATTEMPTS, help="Nombre maximal d'essais par URL dans la file de travail")
@@ -1273,8 +1272,8 @@ def get_pdf_page_count(path: Path) -> int:
 
 
 def html_to_markdown(html: str, base_url: str, output_dir: Path, session: requests.Session,
-                     follow_links: bool = False, page_assets_dir: Optional[Path] = None) -> tuple[str, Optional[Path], list[Path]]:
-    """Convert HTML to Markdown with front matter and download images."""
+                     page_assets_dir: Optional[Path] = None) -> tuple[str, Optional[Path], list[Path]]:
+    """Convert HTML to Markdown with front matter and download linked images."""
     soup = BeautifulSoup(html, "html.parser")
     
     # Extract title and metadata
@@ -1300,15 +1299,14 @@ def html_to_markdown(html: str, base_url: str, output_dir: Path, session: reques
     
     markdown_content = "\n".join(content_parts)
     
-    # Download images if requested
+    # Download linked images for webpage conversions.
     image_paths = []
-    if follow_links:
-        image_urls = extract_images_from_html(html, base_url)
-        images_dir = (page_assets_dir or (output_dir / slugify(page_title))) / "images"
-        for img_url in image_urls[:10]:  # Limit to 10 images
-            img_path = download_image(img_url, images_dir, session)
-            if img_path:
-                image_paths.append(img_path)
+    image_urls = extract_images_from_html(html, base_url)
+    images_dir = (page_assets_dir or (output_dir / slugify(page_title))) / "images"
+    for img_url in image_urls[:10]:  # Limit to 10 images
+        img_path = download_image(img_url, images_dir, session)
+        if img_path:
+            image_paths.append(img_path)
     
     return markdown_content, None, image_paths
 
@@ -1475,7 +1473,7 @@ def handle_webpage_with_document_type(url: str, output_dir: Path, document_type:
         return {"success": False, "error": str(e)}
 
 
-def handle_webpage_without_document_type(url: str, output_dir: Path, follow_links: bool,
+def handle_webpage_without_document_type(url: str, output_dir: Path,
                                          session: requests.Session, db_con) -> dict:
     """Handle webpage without document_type - convert to Markdown."""
     try:
@@ -1490,7 +1488,7 @@ def handle_webpage_without_document_type(url: str, output_dir: Path, follow_link
         page_assets_dir = output_dir / page_storage_slug(url, page_title)
         
         # Convert to Markdown
-        markdown_content, _, image_paths = html_to_markdown(html, url, output_dir, session, follow_links, page_assets_dir=page_assets_dir)
+        markdown_content, _, image_paths = html_to_markdown(html, url, output_dir, session, page_assets_dir=page_assets_dir)
         
         # Generate filename
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -1630,7 +1628,7 @@ def main():
         )
     elif is_webpage:
         result = handle_webpage_without_document_type(
-            args.url, out_dir, args.follow_links, session, db_con
+            args.url, out_dir, session, db_con
         )
     else:
         if args.document_type:
