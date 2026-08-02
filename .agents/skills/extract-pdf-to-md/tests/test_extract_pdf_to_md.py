@@ -266,7 +266,8 @@ un"""))
             page_numbers=[7],
             expected_text_included=["""---
 titre: "debat parlementaire"
-source: "debat_parlementaire.pdf"
+source: ".agents/skills/extract-pdf-to-md/tests/debat_parlementaire.pdf"
+source_signature: "2ba6c98bbda3a2d54017152b36f071fc"
 date_extraction: """, """
 pages: "1"
 transformation_by: "skill extract-pdf-to-md"
