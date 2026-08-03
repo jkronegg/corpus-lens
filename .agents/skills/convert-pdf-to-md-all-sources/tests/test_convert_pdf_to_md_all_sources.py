@@ -15,12 +15,12 @@ from unittest.mock import patch
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[1]
     / "scripts"
-    / "extract_pdf_to_md_all_sources.py"
+    / "convert_pdf_to_md_all_sources.py"
 )
 
 
 def load_module():
-    module_name = "extract_pdf_to_md_all_sources"
+    module_name = "convert_pdf_to_md_all_sources"
     spec = importlib.util.spec_from_file_location(module_name, SCRIPT_PATH)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Cannot load script module: {SCRIPT_PATH}")
@@ -33,7 +33,8 @@ def load_module():
 def run_main(module, sources_root: Path, overwrite: bool):
     stdout = io.StringIO()
     stderr = io.StringIO()
-    args = argparse.Namespace(sources_root=sources_root, overwrite=overwrite)
+    summary_path = sources_root.parent / "summary.json"
+    args = argparse.Namespace(sources_root=sources_root, overwrite=overwrite, summary_path=summary_path)
 
     with (
         patch.object(module, "parse_args", return_value=args, create=True),
@@ -43,10 +44,11 @@ def run_main(module, sources_root: Path, overwrite: bool):
     ):
         exit_code = module.main()
 
-    return exit_code, stdout.getvalue()
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    return exit_code, stdout.getvalue(), summary
 
 
-class TestExtractPdfToMdAllSources(unittest.TestCase):
+class TestConvertPdfToMdAllSources(unittest.TestCase):
     def test_two_pdfs_in_different_directories_are_processed(self):
         module = load_module()
 
@@ -67,19 +69,19 @@ class TestExtractPdfToMdAllSources(unittest.TestCase):
                 return 1
 
             with patch.object(module, "_load_unit_extractor", return_value=fake_extract, create=True):
-                exit_code, stdout_text = run_main(module, sources_root=sources_root, overwrite=False)
+                exit_code, stdout_text, summary = run_main(module, sources_root=sources_root, overwrite=False)
 
             self.assertEqual(exit_code, 0)
             self.assertEqual(len(calls), 2)
             self.assertTrue(pdf_a.with_suffix(".md").exists())
             self.assertTrue(pdf_b.with_suffix(".md").exists())
 
-            summary = json.loads(stdout_text)
             self.assertEqual(summary["selection_mode"], "filesystem")
             self.assertEqual(summary["counts"]["pdf_total"], 2)
             self.assertEqual(summary["counts"]["extracted"], 2)
             self.assertEqual(summary["counts"]["skipped_exists"], 0)
             self.assertEqual(summary["counts"]["errors"], 0)
+            self.assertEqual(stdout_text.strip().splitlines()[-1], "summary.json")
 
     def test_idempotence_second_run_does_not_reextract(self):
         module = load_module()
@@ -101,18 +103,19 @@ class TestExtractPdfToMdAllSources(unittest.TestCase):
                 return 2
 
             with patch.object(module, "_load_unit_extractor", return_value=fake_extract, create=True):
-                first_exit, first_stdout = run_main(module, sources_root=sources_root, overwrite=False)
-                second_exit, second_stdout = run_main(module, sources_root=sources_root, overwrite=False)
+                first_exit, first_stdout, first_summary = run_main(module, sources_root=sources_root, overwrite=False)
+                second_exit, second_stdout, second_summary = run_main(module, sources_root=sources_root, overwrite=False)
 
             self.assertEqual(first_exit, 0)
             self.assertEqual(second_exit, 0)
             self.assertEqual(call_counter["count"], 2)
 
-            first_summary = json.loads(first_stdout)
             self.assertEqual(first_summary["counts"]["extracted"], 2)
             self.assertEqual(first_summary["counts"]["skipped_exists"], 0)
-
-            self.assertEqual(second_stdout.strip(), "Aucun PDF à convertir")
+            self.assertEqual(second_summary["counts"]["extracted"], 0)
+            self.assertEqual(second_summary["counts"]["skipped_exists"], 2)
+            self.assertEqual(first_stdout.strip().splitlines()[-1], "summary.json")
+            self.assertEqual(second_stdout.strip().splitlines()[-1], "summary.json")
 
     def test_overwrite_forces_new_extraction(self):
         module = load_module()
@@ -134,18 +137,18 @@ class TestExtractPdfToMdAllSources(unittest.TestCase):
                 return 3
 
             with patch.object(module, "_load_unit_extractor", return_value=fake_extract, create=True):
-                first_exit, _ = run_main(module, sources_root=sources_root, overwrite=False)
-                second_exit, second_stdout = run_main(module, sources_root=sources_root, overwrite=True)
+                first_exit, _, _ = run_main(module, sources_root=sources_root, overwrite=False)
+                second_exit, second_stdout, second_summary = run_main(module, sources_root=sources_root, overwrite=True)
 
             self.assertEqual(first_exit, 0)
             self.assertEqual(second_exit, 0)
             self.assertEqual(call_counter["count"], 4)
 
-            second_summary = json.loads(second_stdout)
             self.assertEqual(second_summary["counts"]["pdf_total"], 2)
             self.assertEqual(second_summary["counts"]["extracted"], 2)
             self.assertEqual(second_summary["counts"]["skipped_exists"], 0)
             self.assertEqual(second_summary["counts"]["errors"], 0)
+            self.assertEqual(second_stdout.strip().splitlines()[-1], "summary.json")
 
 
 if __name__ == "__main__":

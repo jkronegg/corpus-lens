@@ -15,7 +15,7 @@ IGNORED_FILENAMES = {
 }
 IGNORED_SUFFIXES = (".log",)
 IGNORED_PREFIXES = ("~$", # lock file prefix for Office documents
-                    "worklist_pdf_", # log file skill extract-pdf-to-md
+                    "worklist_pdf_", # log file skill convert-pdf-to-md
                     )
 
 NAMED_ENTITIES_DB_SCRIPTS_DIR = (

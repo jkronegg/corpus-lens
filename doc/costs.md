@@ -69,7 +69,7 @@ Exemples:
 | translate-markdown |                                           |
 | manage-named-entities-db |                                           |
 | indexer-sources | 2.5                                       |
-| extract-pdf-to-md-all-sources | 2.5                                       |
+| convert-pdf-to-md-all-sources | 2.5                                       |
 | analyse-swissvotes-votations | 1.5                                       |
-| extract-pdf-to-md |                                           |
+| convert-pdf-to-md |                                           |
 

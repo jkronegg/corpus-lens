@@ -10,7 +10,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-SKILL_NAME = "extract-pdf-to-md-all-sources"
+SKILL_NAME = "convert-pdf-to-md-all-sources"
 
 
 @dataclass
@@ -23,7 +23,7 @@ class FileResult:
 
 
 def _load_unit_extractor(repo_root: Path):
-    script_path = repo_root / ".agents" / "skills" / "extract-pdf-to-md" / "scripts" / "pdf_to_md_extractor.py"
+    script_path = repo_root / ".agents" / "skills" / "convert-pdf-to-md" / "scripts" / "pdf_to_md_extractor.py"
     if not script_path.exists():
         raise FileNotFoundError(f"Unit extractor not found: {script_path}")
 
@@ -47,7 +47,7 @@ def _load_db_module(repo_root: Path):
     if not script_path.exists():
         return None
 
-    module_name = "extract_pdf_to_md_all_sources_db"
+    module_name = "convert_pdf_to_md_all_sources_db"
     spec = importlib.util.spec_from_file_location(module_name, script_path)
     if spec is None or spec.loader is None:
         return None
@@ -79,7 +79,7 @@ def parse_args() -> argparse.Namespace:
         "--summary-path",
         type=Path,
         default=None,
-        help="Path for the JSON summary file (default: <repo>/extract_pdf_to_md_all_sources_summary.json)",
+        help="Path for the JSON summary file (default: <repo>/convert_pdf_to_md_all_sources_summary.json)",
     )
     return parser.parse_args()
 
@@ -143,7 +143,7 @@ def main() -> int:
         raise FileNotFoundError(f"sources root not found: {sources_root}")
 
     repo_root = Path(__file__).resolve().parents[4]
-    summary_path = (args.summary_path or (repo_root / "extract_pdf_to_md_all_sources_summary.json")).resolve()
+    summary_path = (args.summary_path or (repo_root / "convert_pdf_to_md_all_sources_summary.json")).resolve()
     extract_pdf_to_md = _load_unit_extractor(repo_root)
 
     pdf_files, selection_mode = _collect_pdf_candidates_from_db(repo_root, sources_root)

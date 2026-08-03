@@ -40,7 +40,7 @@ python -u -c "
 import importlib.util
 from pathlib import Path
 
-script_path = Path(r'.agents/skills/extract-pdf-to-md/scripts/pdf_to_md_extractor.py').resolve()
+script_path = Path(r'.agents/skills/convert-pdf-to-md/scripts/pdf_to_md_extractor.py').resolve()
 spec = importlib.util.spec_from_file_location('pdf_to_md_extractor', script_path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -59,7 +59,7 @@ python -u -c "
 import importlib.util
 from pathlib import Path
 
-script_path = Path(r'.agents/skills/extract-pdf-to-md/scripts/pdf_to_md_extractor.py').resolve()
+script_path = Path(r'.agents/skills/convert-pdf-to-md/scripts/pdf_to_md_extractor.py').resolve()
 spec = importlib.util.spec_from_file_location('pdf_to_md_extractor', script_path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -77,7 +77,7 @@ print(f'ok: {pages} pages extraites vers {pdf_path.with_suffix(".md")}')
 import importlib.util
 from pathlib import Path
 
-script_path = Path(r".agents/skills/extract-pdf-to-md/scripts/pdf_to_md_extractor.py").resolve()
+script_path = Path(r".agents/skills/convert-pdf-to-md/scripts/pdf_to_md_extractor.py").resolve()
 spec = importlib.util.spec_from_file_location("pdf_to_md_extractor", script_path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)

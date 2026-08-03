@@ -28,13 +28,13 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
 
 
 
-SKILL_NAME = "extract-pdf-to-md"
+SKILL_NAME = "convert-pdf-to-md"
 
 _ROOT = Path(__file__).resolve().parents[4]
 _DETECT_LANG_PATH = _ROOT / ".agents" / "skills" / "translate-markdown" / "scripts" / "detect_markdown_language.py"
 _TRANSLATE_MD_PATH = _ROOT / ".agents" / "skills" / "translate-markdown" / "scripts" / "translate_markdown.py"
 _DB_MODULE_PATH = _ROOT / ".agents" / "skills" / "manage-named-entities-db" / "scripts" / "db.py"
-_MISTRAL_OCR_PATH = _ROOT / ".agents" / "skills" / "extract-pdf-to-md" / "scripts" / "mistral_ocr.py"
+_MISTRAL_OCR_PATH = _ROOT / ".agents" / "skills" / "convert-pdf-to-md" / "scripts" / "mistral_ocr.py"
 
 
 _INDEXER_SOURCES_SCRIPTS_DIR = (

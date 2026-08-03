@@ -3,7 +3,7 @@ titre: "CODEBOOK"
 source: ".agents\skills\analyse-swissvotes-votations\assets\CODEBOOK.pdf"
 date_extraction: "2026-05-24T00:06:22.312465"
 pages: "49"
-transformation_by: "skill extract-pdf-to-md"
+transformation_by: "skill convert-pdf-to-md"
 language_distribution: "de:86, fr:14, en:0"
 ---
 Pages détectées: 1, 2, 3, 1848, 1849, 1850, 1851, 1852, 1853, 1854, 1855, 1856, 1857, 1858, 1859, 1860, 1861, 1862, 1863, 1864, 1865, 1848, 1849, 1850, 1851, 1852, 1853, 1848, 1849, 1850, 100, 101, 102, 103, 104, 105, 106, 107, 108, 1848, 1849, 1850, 1851, 1852, 1853, 1848, 1977, 1977, 1978

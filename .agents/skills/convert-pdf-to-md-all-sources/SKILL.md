@@ -1,5 +1,5 @@
 ---
-name: extract-pdf-to-md-all-sources
+name: convert-pdf-to-md-all-sources
 description: Scan `sources/**/*.pdf` and extract Markdown for each PDF missing a same-name `.md` file.
 ---
 
@@ -27,11 +27,11 @@ Ce skill parcourt récursivement `sources/**/*.pdf` et lance l'extraction Markdo
 ## Commandes
 
 ```powershell
-python -u ".agents/skills/extract-pdf-to-md-all-sources/scripts/extract_pdf_to_md_all_sources.py"
+python -u ".agents/skills/convert-pdf-to-md-all-sources/scripts/convert_pdf_to_md_all_sources.py"
 ```
 
 ```powershell
-python -u ".agents/skills/extract-pdf-to-md-all-sources/scripts/extract_pdf_to_md_all_sources.py" --overwrite
+python -u ".agents/skills/convert-pdf-to-md-all-sources/scripts/convert_pdf_to_md_all_sources.py" --overwrite
 ```
 
 
@@ -39,7 +39,7 @@ python -u ".agents/skills/extract-pdf-to-md-all-sources/scripts/extract_pdf_to_m
 
 Le script appelle la fonction Python unitaire:
 - `extract_pdf_to_md(pdf_path: Path, md_path: Path) -> int`
-depuis `\.agents\skills\extract-pdf-to-md\scripts\pdf_to_md_extractor.py`.
+depuis `\.agents\skills\convert-pdf-to-md\scripts\pdf_to_md_extractor.py`.
 
 Le convertisseur unitaire peut appliquer un fallback OCR sur les pages sans texte exploitable, si les dépendances optionnelles sont installées.
 

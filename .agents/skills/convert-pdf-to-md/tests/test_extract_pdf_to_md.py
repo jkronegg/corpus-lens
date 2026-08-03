@@ -266,13 +266,13 @@ un"""))
             page_numbers=[7],
             expected_text_included=["""---
 titre: "debat parlementaire"
-source: ".agents/skills/extract-pdf-to-md/tests/debat_parlementaire.pdf"
+source: ".agents/skills/convert-pdf-to-md/tests/debat_parlementaire.pdf"
 source_signature: "2ba6c98bbda3a2d54017152b36f071fc"
 date_extraction: """, """
 pages: "1"
-transformation_by: "skill extract-pdf-to-md"
+transformation_by: "skill convert-pdf-to-md"
 language_distribution: "de:72, fr:28"
-author: "skill extract-pdf-to-md"
+author: "skill convert-pdf-to-md"
 ---
 """])
 
