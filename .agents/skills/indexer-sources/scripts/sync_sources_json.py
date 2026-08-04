@@ -87,9 +87,9 @@ def run_pdf_extraction_batch() -> bool:
         ROOT
         / ".agents"
         / "skills"
-        / "extract-pdf-to-md-all-sources"
+        / "convert-pdf-to-md-all-sources"
         / "scripts"
-        / "extract_pdf_to_md_all_sources.py"
+        / "convert_pdf_to_md_all_sources.py"
     )
     if not extract_script.exists():
         print(f"[WARN] script PDF extraction introuvable, ignoré: {extract_script}")

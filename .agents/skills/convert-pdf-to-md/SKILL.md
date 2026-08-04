@@ -1,5 +1,5 @@
 ---
-name: extract-pdf-to-md
+name: convert-pdf-to-md
 description: Extrait le texte d'un PDF en Markdown paginé avec front matter YAML.
 ---
 
