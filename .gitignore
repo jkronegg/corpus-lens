@@ -1,3 +1,4 @@
 /.venv/
 /.env
 /indexation_sources.log
+/.agents/skills/analyse-cadastre-energetique/assets/Cadastre_energetique_des_batiments_vaudois_103-VD.1.gpkg
