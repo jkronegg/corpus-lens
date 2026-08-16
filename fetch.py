@@ -109,7 +109,14 @@ SUBCOMMANDS: dict[str, dict[str, Any]] = {
         "help": "Télécharge les sources officielles d'une votation fédérale suisse.",
         "usage": "fetch swissvote <id_votation>",
     },
-    "votation": {"alias": "swissvote"}
+    "votation": {"alias": "swissvote"},
+    "romande-energie": {
+        "script": ".agents/skills/fetch-romande-energie-data/scripts/fetch_romande_energie_data.py",
+        "primary_flag": "--start-date",
+        "help": "Télécharge les courbes de consommation Romande Energie.",
+        "usage": "fetch romande-energie [YYYY-MM-DD] [--granularity QUARTER_HOURLY]",
+    },
+    "romande": {"alias": "romande-energie"}
 }
 
 
@@ -155,6 +162,7 @@ def print_help() -> None:
     print('  fetch swissvote 639')
     print('  fetch dodis "https://dodis.ch/search?q=panama&c=Document"')
     print('  fetch dodis-document 43445')
+    print('  fetch romande-energie 2024-12-15 --granularity QUARTER_HOURLY')
     print()
     print("Options génériques (passées directement au script sous-jacent):")
     print("  --dry-run          Vérifie sans télécharger")
