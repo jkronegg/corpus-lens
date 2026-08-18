@@ -36,6 +36,8 @@
       <sourceFolder url="file://$MODULE_DIR$/.agents/skills/translate-markdown/scripts" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/.agents/skills/analyse-cadastre-energetique/scripts" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/.agents/skills/analyse-cadastre-energetique/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/analyse-consommation-pv-batterie/scripts" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.agents/skills/analyse-consommation-pv-batterie/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/.agents/skills/convert-md-to-word/scripts" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/.agents/skills/convert-md-to-word/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/.agents/skills/fetch-romande-energie-data/scripts" isTestSource="false" />

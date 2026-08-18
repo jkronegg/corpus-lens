@@ -1,0 +1,3 @@
+# Ce script utilise uniquement la librairie standard Python.
+# Fichier conserve pour harmoniser avec les autres skills.
+

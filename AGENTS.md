@@ -21,3 +21,5 @@ Le jugement historique reste humain. Les agents servent d'assistance documentair
     a. lorsque tu dois faire des calculs, tu dois écrire un script qui fait le calcul (pas de calcul avec un LLM!).
 5. Vérifier dans les sources.
 
+# Notes
+- lorsque tu accèdes à un fichier, utilise le chemin absolu et pas le schéma "file://".

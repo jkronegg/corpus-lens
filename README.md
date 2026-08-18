@@ -2,14 +2,16 @@
 
 ## Objectif du projet
 
-`corpus-lens` est un assistant de recherche historique fondé sur un **LLM** combiné à une architecture **RAG** (Retrieval-Augmented Generation), des **skills** automatisés et des **agents spécialisés**.
+`corpus-lens` est un assistant basé sur un **LLM** combiné à une architecture **RAG** (Retrieval-Augmented Generation), des **skills** automatisés et des **agents spécialisés**.
 
-Sa mission est d'aider un historien de la Suisse à :
+Sa mission est d'aider l'utilisateur à :
 - collecter rapidement des sources pertinentes ;
 - organiser et indexer ces sources de manière exploitable ;
 - interroger le corpus avec l'appui d'un LLM.
 
-Le projet est conçu comme un **outil d'assistance** : il n'a pas pour but de remplacer le travail d'analyse et d'interprétation de l'historien, mais d'en améliorer la productivité et la traçabilité.
+Le projet est conçu comme un **outil d'assistance** : il n'a pas pour but de remplacer le travail d'analyse et d'interprétation, mais d'en améliorer la productivité et la traçabilité.
+
+L'outil Deux profils d'utilisateurs 
 
 ## Fonctionnalités principales
 
