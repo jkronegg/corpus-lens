@@ -11,7 +11,10 @@ Sa mission est d'aider l'utilisateur à :
 
 Le projet est conçu comme un **outil d'assistance** : il n'a pas pour but de remplacer le travail d'analyse et d'interprétation, mais d'en améliorer la productivité et la traçabilité.
 
-L'outil Deux profils d'utilisateurs 
+L'outil est conçu pour plusieurs profils d'utilisateurs :
+- **l'historien ou le chercheur** : il peut se concentrer sur l'analyse critique des sources, la contextualisation et la rédaction scientifique, tout en s'appuyant sur l'outil pour accélérer la collecte et l'organisation des informations.
+- **le citoyen intéressé par la transition énergétique** : il peut explorer les données, comprendre les enjeux et accéder à des informations fiables, tout en ayant la possibilité de vérifier les sources.
+- **le conseiller communal** qui veut se faire assister dans ces démarches au sein du conseil
 
 ## Fonctionnalités principales
 
@@ -21,7 +24,7 @@ Le projet intègre des workflows pour télécharger et préparer des sources de 
 - **articles de journaux** (presse numérisée, e-newspaper) ;
 - **documents officiels** (p. ex. documents liés aux votations fédérales, Swissvotes, Confédération) ;
 - **sources encyclopédiques et diplomatiques** (DHS, Dodis, ElitesSuisses) ;
-- **données quantitatives** (p. ex. évolution de la population, résultats de votations).
+- **données quantitatives** (p. ex. évolution de la population, résultats de votations, consommation énergétique des bâtiments).
 ![functional_architecture.png](doc/functional_architecture.png)
 
 ### 2) Extraction et normalisation documentaire
@@ -40,7 +43,7 @@ Le projet maintient un index canonique des sources dans `named_entities.sqlite` 
 
 ### 4) Recherche assistée par LLM (RAG)
 
-Une fois les sources validées et indexées, l'historien peut :
+Une fois les sources validées et indexées, l'utilisateur peut :
 - poser des questions au corpus ;
 - obtenir des réponses ancrées dans les documents ;
 - naviguer plus vite entre faits, acteurs, périodes et controverses.

@@ -23,3 +23,4 @@ Le jugement historique reste humain. Les agents servent d'assistance documentair
 
 # Notes
 - lorsque tu accèdes à un fichier, utilise le chemin absolu et pas le schéma "file://".
+- lorsque tu écris un fichier Markdown en langue française, rédige avec les accents.
