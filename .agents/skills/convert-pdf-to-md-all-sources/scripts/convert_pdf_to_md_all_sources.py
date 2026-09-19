@@ -93,7 +93,7 @@ def _print_progress(current: int, total: int, label: str = "") -> None:
     bar = "█" * filled + "░" * (width - filled)
     suffix = f" {label}" if label else ""
     end = "\n" if current >= total else "\r"
-    print(f"[PDF] |{bar}| {current:>3}/{total:<3}{suffix}", end=end, flush=True)
+    print(f"[Convert PDF->Markdown] |{bar}| {current:>3}/{total:<3}{suffix}", end=end, flush=True)
 
 
 def _collect_pdf_candidates_from_db(repo_root: Path, sources_root: Path) -> tuple[list[Path], str]:
