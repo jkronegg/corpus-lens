@@ -779,9 +779,18 @@ def uncovered_chunks(start: dt.date, end: dt.date, covered: Iterable[DateChunk])
 
 def normalize_csv_text(csv_text: str) -> str:
     # Harmonise les fins de ligne et supprime les lignes vides de transport.
-    text = csv_text.replace("\ufeff", "")
-    lines = [line.strip("\r") for line in text.splitlines() if line.strip()]
+    text = strip_utf8_magic_prefix(csv_text).replace("\ufeff", "")
+    lines = [strip_utf8_magic_prefix(line.strip("\r")) for line in text.splitlines() if line.strip()]
     return "\n".join(lines) + ("\n" if lines else "")
+
+
+def strip_utf8_magic_prefix(value: str) -> str:
+    # Certains exports encapsulent le BOM UTF-8 en texte visible "\u00ef\u00bb\u00bf".
+    text = value
+    for prefix in ("\ufeff", "\u00ef\u00bb\u00bf"):
+        while text.startswith(prefix):
+            text = text[len(prefix) :]
+    return text
 
 
 def is_empty_month_marker(csv_text: str) -> bool:
@@ -804,6 +813,9 @@ def is_cached_month_complete(csv_text: str, month_first_day: dt.date, requested_
 
 
 def download_curve_chunk(auth: AuthState, contract_id: str, granularity: str, chunk: DateChunk, output_path: Path) -> str:
+    # L'API Romande Energie traite end_date comme une borne exclusive (non incluse).
+    # On ajoute +1 jour pour que le dernier jour du chunk soit bien retourné par l'API.
+    api_end_date = chunk.end + dt.timedelta(days=1)
     response = authorized_api_request(
         auth,
         "GET",
@@ -811,7 +823,7 @@ def download_curve_chunk(auth: AuthState, contract_id: str, granularity: str, ch
         params={
             "granularity": granularity,
             "start_date": chunk.start.strftime(DATE_FMT),
-            "end_date": chunk.end.strftime(DATE_FMT),
+            "end_date": api_end_date.strftime(DATE_FMT),
         },
     )
     content_type = response.headers.get("content-type", "").lower()
@@ -833,11 +845,15 @@ def read_curve_rows(csv_text: str) -> tuple[list[str], list[tuple[dt.datetime, l
         return [], []
 
     header = rows[0]
+    if header:
+        header[0] = strip_utf8_magic_prefix(header[0].strip())
     data: list[tuple[dt.datetime, list[str]]] = []
     for row in rows[1:]:
         if not row or not any(cell.strip() for cell in row):
             continue
-        parsed = parse_curve_timestamp(row[0].strip())
+        row = list(row)
+        row[0] = strip_utf8_magic_prefix(row[0].strip())
+        parsed = parse_curve_timestamp(row[0])
         if parsed is None:
             continue
         data.append((parsed, row))
@@ -1039,8 +1055,21 @@ def main() -> int:
         force_refresh = refresh_month is not None and month_first_day == refresh_month
 
         if target_path.exists() and not force_refresh:
-            reused.append(target_path)
             csv_text = target_path.read_text(encoding="utf-8")
+            # Vérifier la complétude de TOUS les mois en cache (pas seulement le dernier),
+            # afin de détecter et retélécharger les mois dont le dernier jour manque
+            # (typiquement suite au bug end_date exclusive de l'API Romande Energie).
+            if not is_empty_month_marker(csv_text) and not is_cached_month_complete(
+                csv_text, month_first_day, requested_end
+            ):
+                LOGGER.info(
+                    "Mois %s incomplet en cache (dernier jour manquant?), retéléchargement.",
+                    month_first_day.strftime("%Y-%m"),
+                )
+                csv_text = download_curve_chunk(auth, contract_id, args.granularity, chunk, target_path)
+                downloaded.append(target_path)
+            else:
+                reused.append(target_path)
         else:
             csv_text = download_curve_chunk(auth, contract_id, args.granularity, chunk, target_path)
             downloaded.append(target_path)
