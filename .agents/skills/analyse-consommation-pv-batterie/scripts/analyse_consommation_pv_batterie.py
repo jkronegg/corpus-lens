@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import logging
 import json
 import math
 import statistics
+import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -97,6 +99,7 @@ ORIENTATION_LOOKUP_SHIFT = {
     "east": 2,
     "west": -2,
 }
+PANEL_REMOVAL_ORDER = ("north", "east", "west", "south")
 
 # Inclinaison du toit (degres). 50 degres correspond a une pente relativement forte.
 DEFAULT_ROOF_TILT_DEG: float = 50.0
@@ -109,19 +112,23 @@ REFERENCE_OPTIMAL_TILT_DEG: float = 35.0
 ELECTRICITY_PRICE_CHF_PER_KWH: float = 0.29
 # Prix de reprise énergie injectée (rétribution au prix du marché, Pronovo/swissgrid 2026).
 BUYBACK_PRICE_CHF_PER_KWH: float = 0.06
-# Coût fixe installation PV (hors logistique chantier): onduleur string résidentiel,
-# raccordement réseau, compteur bidirectionnel, frais d'annonce/permis, câblage DC/AC.
-PV_FIXED_COST_CHF: float = 3_000.0
-# Coût de mise en place chantier (échafaudage + protections + logistique accès toiture).
+# Subvention Pronovo supposée par kWp installé.
+PRONOVO_SUBSIDY_CHF_PER_KWP: float = 360.0
+# Déduction fiscale estimée sur la facture totale brute de l'installation.
+TAX_DEDUCTION_RATE: float = 0.13
+# Coût fixe installation PV (hors logistique chantier): onduleur string résidentiel, smart meter,
+# raccordement réseau, compteur bidirectionnel, frais d'annonce/permis, câblage DC/AC, mise en service, contrôle final.
+PV_FIXED_COST_CHF: float = 4_500.0
+# Coût de mise en place chantier (échafaudage, protections, logistique accès toiture, système de levage).
 # Ordre de grandeur vaudois 2026 pour maison individuelle: 3'500-6'000 CHF.
-PV_SITE_SETUP_COST_CHF: float = 4_500.0
-# Coût par panneau 430-450 Wc, pose incluse (module premium ~170-210 CHF +
-# structure/montage/câblage/part variable MO ~280-320 CHF) en contexte suisse.
-PV_COST_PER_PANEL_CHF: float = 500.0
+PV_SITE_SETUP_COST_CHF: float = 4_000.0
+# Coût par panneau, pose incluse (module premium ~170-210 CHF +
+# optimiseur/logistique/structure/montage/câblage/main d'oeuvre ~280-320 CHF) en contexte suisse.
+PV_COST_PER_PANEL_CHF: float = 510.0
 # Coût fixe batterie : BMS intégré, câblage AC/DC, mise en service.
 BATTERY_FIXED_COST_CHF: float = 1_000.0
 # Coût par kWh de capacité nominale installée (technologie LFP, marché romand 2026).
-BATTERY_COST_PER_KWH_CHF: float = 700.0
+BATTERY_COST_PER_KWH_CHF: float = 275.0
 # Répartiteur/EMS pour pilotage énergétique global bâtiment
 # (PAC chauffage, gros consommateurs, recharge véhicule électrique, etc.).
 ENERGY_MANAGER_FIXED_COST_CHF: float = 2_500.0
@@ -131,6 +138,11 @@ ANALYSIS_YEARS: int = 25
 DISCOUNT_RATE: float = 0.03
 # Rendement annuel de référence pour un placement alternatif en fonds d'investissement.
 FUND_RETURN_RATE: float = 0.03
+# Hypothèse de maintenance annuelle: pourcentage du CAPEX brut (avant réductions).
+ANNUAL_MAINTENANCE_RATE: float = 0.01
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -161,6 +173,14 @@ class PvSystemConfig:
     @property
     def total_kwp(self) -> float:
         return sum(self.orientation_kwp.values())
+
+    @property
+    def effective_kwp(self) -> float:
+        """Puissance equivalente sud, ponderee par les facteurs d'orientation."""
+        return sum(
+            kwp * ORIENTATION_YIELD_FACTOR.get(orientation, 1.0)
+            for orientation, kwp in self.orientation_kwp.items()
+        )
 
     def orientation_summary(self) -> str:
         parts: list[str] = []
@@ -397,6 +417,45 @@ def build_layout_pv_config(panel_counts: dict[str, int], panel_watt_peak: float)
     )
 
 
+def make_panel_variant_name(panel_counts: dict[str, int]) -> str:
+    return (
+        f"N{panel_counts.get('north', 0)}_"
+        f"S{panel_counts.get('south', 0)}_"
+        f"E{panel_counts.get('east', 0)}_"
+        f"O{panel_counts.get('west', 0)}"
+    )
+
+
+def build_panel_count_variants(
+    panel_counts: dict[str, int],
+    min_total_panels: int,
+) -> list[dict[str, int]]:
+    total_installable_panels = sum(panel_counts.values())
+    if total_installable_panels <= 0:
+        return []
+
+    min_target = max(1, min(min_total_panels, total_installable_panels))
+    current = {orientation: int(panel_counts.get(orientation, 0)) for orientation in ORIENTATIONS}
+    variants: list[dict[str, int]] = []
+
+    while True:
+        current_total = sum(current.values())
+        if current_total < min_target:
+            break
+        variants.append(dict(current))
+        if current_total == min_target:
+            break
+
+        for orientation in PANEL_REMOVAL_ORDER:
+            if current.get(orientation, 0) > 0:
+                current[orientation] -= 1
+                break
+        else:
+            break
+
+    return variants
+
+
 def build_legacy_pv_config(pv_kwp: float, panel_watt_peak: float) -> PvSystemConfig:
     approx_panels = math.ceil((pv_kwp * 1000.0) / panel_watt_peak) if pv_kwp > 0 else 0
     return PvSystemConfig(
@@ -410,11 +469,36 @@ def build_pv_configs(
     pv_kwp_values: list[float],
     panel_counts: dict[str, int],
     panel_watt_peak: float,
+    min_total_panels: int,
 ) -> tuple[list[PvSystemConfig], str]:
     total_installable_panels = sum(panel_counts.values())
     if total_installable_panels > 0:
-        return [build_layout_pv_config(panel_counts, panel_watt_peak)], "panel_layout"
+        panel_variants = build_panel_count_variants(panel_counts, min_total_panels=min_total_panels)
+        pv_variants = []
+        for variant in panel_variants:
+            config = build_layout_pv_config(variant, panel_watt_peak)
+            pv_variants.append(
+                PvSystemConfig(
+                    name=f"layout_{make_panel_variant_name(variant)}",
+                    orientation_panels=config.orientation_panels,
+                    orientation_kwp=config.orientation_kwp,
+                )
+            )
+        return pv_variants, "panel_variants"
     return [build_legacy_pv_config(pv_kwp, panel_watt_peak) for pv_kwp in pv_kwp_values], "pv_kwp_list"
+
+
+def print_progress(current: int, total: int, prefix: str = "Simulation") -> None:
+    if total <= 0:
+        return
+    width = 28
+    ratio = max(0.0, min(1.0, current / total))
+    filled = int(ratio * width)
+    bar = "#" * filled + "-" * (width - filled)
+    sys.stdout.write(f"\r{prefix}: [{bar}] {current}/{total} ({ratio * 100:5.1f}%)")
+    if current >= total:
+        sys.stdout.write("\n")
+    sys.stdout.flush()
 
 
 def pv_system_kwh_quarter(
@@ -426,6 +510,18 @@ def pv_system_kwh_quarter(
     for orientation, kwp in pv_config.orientation_kwp.items():
         total += kwp * pv_kwh_per_kwp_quarter(ts, orientation, roof_tilt_deg=roof_tilt_deg)
     return total
+
+
+def build_pv_generation_series(
+    quarter_records: list[QuarterRecord],
+    pv_config: PvSystemConfig,
+    roof_tilt_deg: float,
+) -> list[float]:
+    """Pré-calcule la production PV quart-horaire pour une configuration donnée."""
+    return [
+        pv_system_kwh_quarter(rec.ts, pv_config, roof_tilt_deg=roof_tilt_deg)
+        for rec in quarter_records
+    ]
 
 
 def parse_float_list(csv_values: str) -> list[float]:
@@ -454,15 +550,26 @@ def simulate_scenario(
     pv_cost_per_panel: float = PV_COST_PER_PANEL_CHF,
     battery_fixed_cost: float = BATTERY_FIXED_COST_CHF,
     battery_cost_per_kwh: float = BATTERY_COST_PER_KWH_CHF,
+    energy_manager_enabled: bool = False,
     energy_manager_fixed_cost: float = ENERGY_MANAGER_FIXED_COST_CHF,
+    pronovo_subsidy_chf_per_kwp: float = PRONOVO_SUBSIDY_CHF_PER_KWP,
+    tax_deduction_rate: float = TAX_DEDUCTION_RATE,
     analysis_years: int = ANALYSIS_YEARS,
     discount_rate: float = DISCOUNT_RATE,
     fund_return_rate: float = FUND_RETURN_RATE,
+    annual_maintenance_rate: float = ANNUAL_MAINTENANCE_RATE,
+    pv_generation_series: list[float] | None = None,
 ) -> dict[str, Any]:
     if not (0 < battery_dod <= 1):
         raise ValueError("battery_dod doit etre dans ]0,1]")
     if not (0 < battery_roundtrip_efficiency <= 1):
         raise ValueError("battery_roundtrip_efficiency doit etre dans ]0,1]")
+    if pronovo_subsidy_chf_per_kwp < 0:
+        raise ValueError("pronovo_subsidy_chf_per_kwp doit etre >= 0")
+    if not (0 <= tax_deduction_rate <= 1):
+        raise ValueError("tax_deduction_rate doit etre dans [0,1]")
+    if not (0 <= annual_maintenance_rate <= 1):
+        raise ValueError("annual_maintenance_rate doit etre dans [0,1]")
 
     charge_eff = math.sqrt(battery_roundtrip_efficiency)
     discharge_eff = math.sqrt(battery_roundtrip_efficiency)
@@ -477,9 +584,16 @@ def simulate_scenario(
     grid_import = 0.0
     grid_export = 0.0
 
-    for rec in quarter_records:
+    if pv_generation_series is not None and len(pv_generation_series) != len(quarter_records):
+        raise ValueError("pv_generation_series doit avoir la meme longueur que quarter_records")
+
+    for idx, rec in enumerate(quarter_records):
         load = rec.kwh
-        pv = pv_system_kwh_quarter(rec.ts, pv_config, roof_tilt_deg=roof_tilt_deg)
+        pv = pv_generation_series[idx] if pv_generation_series is not None else pv_system_kwh_quarter(
+            rec.ts,
+            pv_config,
+            roof_tilt_deg=roof_tilt_deg,
+        )
 
         total_load += load
         total_pv += pv
@@ -525,8 +639,15 @@ def simulate_scenario(
     capex_pv = pv_fixed_cost + pv_site_setup_cost + pv_config.total_panels * pv_cost_per_panel
     # Coût fixe batterie seulement si une batterie est installée.
     capex_battery = (battery_fixed_cost + battery_kwh * battery_cost_per_kwh) if battery_kwh > 0 else 0.0
-    # Le repartiteur/EMS est un socle de pilotage transverse PV+batterie+charges.
-    capex_total = capex_pv + capex_battery + energy_manager_fixed_cost
+    # Le repartiteur/EMS n'est facture que si la variante EMS est activee.
+    capex_energy_manager = energy_manager_fixed_cost if energy_manager_enabled else 0.0
+    capex_total_before_reductions = capex_pv + capex_battery + capex_energy_manager
+    pronovo_subsidy = pv_config.total_kwp * pronovo_subsidy_chf_per_kwp if pv_config.total_kwp > 0 else 0.0
+    tax_deduction = capex_total_before_reductions * tax_deduction_rate
+    capex_total_reductions = pronovo_subsidy + tax_deduction
+    capex_total = max(0.0, capex_total_before_reductions - capex_total_reductions)
+    annual_maintenance_cost = capex_total_before_reductions * annual_maintenance_rate
+    maintenance_cost_total = annual_maintenance_cost * analysis_years
 
     # Facturation de base (100 % réseau, sans PV) pour calculer les économies relatives.
     baseline_cost_period = total_load * electricity_price
@@ -561,6 +682,7 @@ def simulate_scenario(
 
     return {
         "pv_kwp": pv_config.total_kwp,
+        "pv_effective_kwp": pv_config.effective_kwp,
         "pv_config_name": pv_config.name,
         "pv_total_panels": pv_config.total_panels,
         "pv_orientation_summary": pv_config.orientation_summary(),
@@ -571,6 +693,7 @@ def simulate_scenario(
         "pv_panels_west": pv_config.orientation_panels.get("west", 0),
         "battery_kwh": battery_kwh,
         "battery_usable_kwh": battery_usable_kwh,
+        "energy_manager_enabled": energy_manager_enabled,
         "total_load_kwh": total_load,
         "total_pv_kwh": total_pv,
         "pv_used_on_site_kwh": pv_used_on_site,
@@ -585,8 +708,16 @@ def simulate_scenario(
         "capex_pv_chf": capex_pv,
         "capex_pv_site_setup_chf": pv_site_setup_cost,
         "capex_battery_chf": capex_battery,
-        "capex_energy_manager_chf": energy_manager_fixed_cost,
+        "capex_energy_manager_chf": capex_energy_manager,
+        "capex_before_reductions_chf": capex_total_before_reductions,
+        "pronovo_subsidy_chf": pronovo_subsidy,
+        "tax_deduction_chf": tax_deduction,
+        "capex_total_reductions_chf": capex_total_reductions,
+        "capex_after_reductions_chf": capex_total,
         "capex_total_chf": capex_total,
+        "initial_investment_chf": capex_total_before_reductions,
+        "annual_maintenance_cost_chf": annual_maintenance_cost,
+        "maintenance_cost_total_chf": maintenance_cost_total,
         "baseline_cost_annual_chf": baseline_cost_annual,
         "import_cost_annual_chf": import_cost_annual,
         "export_revenue_annual_chf": export_revenue_annual,
@@ -612,33 +743,118 @@ def rank_scenarios(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(results, key=sort_key, reverse=True)
 
 
+def _payback_sort_value(scenario: dict[str, Any]) -> float:
+    payback = float(scenario.get("payback_years", float("inf")))
+    return payback if math.isfinite(payback) else float("inf")
+
+
+def rank_scenarios_for_profile(results: list[dict[str, Any]], profile: str) -> list[dict[str, Any]]:
+    if profile == "autonomy":
+        # Autonomiste: autonomie (self-sufficiency) puis VAN.
+        return sorted(
+            results,
+            key=lambda s: (
+                -float(s.get("self_sufficiency_rate", 0.0)),
+                -float(s.get("npv_chf", float("-inf"))),
+                _payback_sort_value(s),
+            ),
+        )
+
+    if profile == "financial":
+        # Financier: VAN + capital puis payback.
+        return sorted(
+            results,
+            key=lambda s: (
+                -float(s.get("npv_plus_capital_chf", s.get("npv_chf", float("-inf")))),
+                _payback_sort_value(s),
+                -float(s.get("self_sufficiency_rate", 0.0)),
+            ),
+        )
+
+    if profile == "ecological":
+        # Ecologiste: payback puis VAN.
+        return sorted(
+            results,
+            key=lambda s: (
+                _payback_sort_value(s),
+                -float(s.get("npv_chf", float("-inf"))),
+                -float(s.get("self_sufficiency_rate", 0.0)),
+            ),
+        )
+
+    raise ValueError(f"Profil inconnu: {profile}")
+
+
 def find_best_scenarios(results: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Trouve le meilleur scénario selon 3 critères différents.
-    
-    Returns:
-        dict avec clés 'autonomy', 'financial', 'ecological'
-    """
     if not results:
         return {}
-    
-    # 1. Maximiser autonomie/auto-consommation (autonomiste)
-    best_autonomy = max(results, key=lambda s: (s["self_sufficiency_rate"], s["auto_consumption_rate"]))
-    
-    # 2. Maximiser VAN à 25 ans (financier)
-    best_financial = max(results, key=lambda s: s["npv_chf"])
-    
-    # 3. Minimiser temps d'amortissement avec économies positives (écolo)
-    scenarios_with_savings = [s for s in results if s["annual_net_savings_chf"] > 0]
-    if scenarios_with_savings:
-        best_ecological = min(scenarios_with_savings, key=lambda s: s["payback_years"])
-    else:
-        best_ecological = results[0]
-    
+
     return {
-        "autonomy": best_autonomy,
-        "financial": best_financial,
-        "ecological": best_ecological,
+        "autonomy": rank_scenarios_for_profile(results, "autonomy")[0],
+        "financial": rank_scenarios_for_profile(results, "financial")[0],
+        "ecological": rank_scenarios_for_profile(results, "ecological")[0],
     }
+
+
+def build_profile_variant_lists(
+    results: list[dict[str, Any]],
+    n_below_optimum: int,
+) -> dict[str, list[dict[str, Any]]]:
+    def add_if_present(
+        target: list[dict[str, Any]],
+        seen: set[int],
+        candidate: dict[str, Any] | None,
+        reason: str,
+    ) -> None:
+        if candidate is None:
+            return
+        cid = id(candidate)
+        if cid in seen:
+            return
+        enriched = dict(candidate)
+        enriched["selection_reason"] = reason
+        target.append(enriched)
+        seen.add(cid)
+
+    out: dict[str, list[dict[str, Any]]] = {}
+    for profile in ("autonomy", "financial", "ecological"):
+        ranked = rank_scenarios_for_profile(results, profile)
+        if not ranked:
+            out[profile] = []
+            continue
+
+        selected: list[dict[str, Any]] = []
+        seen: set[int] = set()
+
+        optimum = ranked[0]
+        add_if_present(selected, seen, optimum, "optimum")
+
+        best_bat_no_ems = next((s for s in ranked if s.get("battery_kwh", 0.0) > 0 and not s.get("energy_manager_enabled", False)), None)
+        best_bat_with_ems = next((s for s in ranked if s.get("battery_kwh", 0.0) > 0 and s.get("energy_manager_enabled", False)), None)
+        best_no_bat_no_ems = next((s for s in ranked if s.get("battery_kwh", 0.0) <= 0 and not s.get("energy_manager_enabled", False)), None)
+
+        add_if_present(selected, seen, best_bat_no_ems, "meilleure batterie sans EMS")
+        add_if_present(selected, seen, best_bat_with_ems, "meilleure batterie avec EMS")
+        add_if_present(selected, seen, best_no_bat_no_ems, "meilleure sans batterie")
+
+        # N solutions juste sous l'optimum (en ordre de classement du profil).
+        below_added = 0
+        for candidate in ranked[1:]:
+            if below_added >= n_below_optimum:
+                break
+            cid = id(candidate)
+            if cid in seen:
+                continue
+            enriched = dict(candidate)
+            enriched["selection_reason"] = "alternative sous optimum"
+            selected.append(enriched)
+            seen.add(cid)
+            below_added += 1
+
+        # Restitution triee selon le profil (et non selon l'ordre d'ajout des types).
+        out[profile] = rank_scenarios_for_profile(selected, profile)
+
+    return out
 
 
 def fmt(value: float | int | None, ndigits: int = 3) -> str:
@@ -655,30 +871,69 @@ def to_percent(value: float | None) -> str:
     return f"{value * 100:.1f}%"
 
 
-def build_markdown_report(
-    input_csv: Path,
-    output_md: Path,
-    consumption_stats: list[dict[str, Any]],
-    month_completeness: dict[int, dict[str, int]],
-    scenarios_ranked: list[dict[str, Any]],
-    panel_watt_peak: float,
-    roof_tilt_deg: float,
-    battery_dod: float,
-    battery_roundtrip_efficiency: float,
-    top_n_scenarios: int,
-    pv_mode: str,
-    best_scenarios: dict[str, dict[str, Any]] | None = None,
-    electricity_price: float = ELECTRICITY_PRICE_CHF_PER_KWH,
-    buyback_price: float = BUYBACK_PRICE_CHF_PER_KWH,
-    pv_fixed_cost: float = PV_FIXED_COST_CHF,
-    pv_site_setup_cost: float = PV_SITE_SETUP_COST_CHF,
-    pv_cost_per_panel: float = PV_COST_PER_PANEL_CHF,
-    battery_fixed_cost: float = BATTERY_FIXED_COST_CHF,
-    battery_cost_per_kwh: float = BATTERY_COST_PER_KWH_CHF,
-    energy_manager_fixed_cost: float = ENERGY_MANAGER_FIXED_COST_CHF,
+def enrich_scenarios_with_capital_value(
+    scenarios: list[dict[str, Any]],
     analysis_years: int = ANALYSIS_YEARS,
-    discount_rate: float = DISCOUNT_RATE,
     fund_return_rate: float = FUND_RETURN_RATE,
+) -> list[dict[str, Any]]:
+    """Enrich scenarios with capital non-dépensé and VAN + capital values."""
+    if not scenarios:
+        return scenarios
+    
+    # Find max CAPEX across all scenarios
+    max_capex = max(float(s.get("capex_total_chf", 0.0)) for s in scenarios)
+    
+    # Add the computed values to each scenario
+    enriched = []
+    for scenario in scenarios:
+        s = dict(scenario)  # Create a copy
+        capex_current = float(s.get("capex_total_chf", 0.0))
+        
+        # Capital non-dépensé: (max_capex - capex_current) * (1 + fund_return_rate)^analysis_years
+        capital_not_spent = (max_capex - capex_current) * ((1.0 + fund_return_rate) ** analysis_years)
+        
+        # VAN + capital non-dépensé
+        npv = float(s.get("npv_chf", 0.0))
+        npv_plus_capital = npv + capital_not_spent
+        
+        s["capital_not_spent_value_chf"] = capital_not_spent
+        s["npv_plus_capital_chf"] = npv_plus_capital
+        enriched.append(s)
+    
+    return enriched
+
+
+def build_markdown_report(
+     input_csv: Path,
+     output_md: Path,
+     consumption_stats: list[dict[str, Any]],
+     month_completeness: dict[int, dict[str, int]],
+     scenarios_ranked: list[dict[str, Any]],
+     panel_watt_peak: float,
+     roof_tilt_deg: float,
+     battery_dod: float,
+     battery_roundtrip_efficiency: float,
+     top_n_scenarios: int,
+     pv_mode: str,
+     panel_limits: dict[str, int] | None = None,
+     pv_variant_count: int | None = None,
+     best_scenarios: dict[str, dict[str, Any]] | None = None,
+     profile_variant_lists: dict[str, list[dict[str, Any]]] | None = None,
+     n_below_optimum: int = 3,
+     electricity_price: float = ELECTRICITY_PRICE_CHF_PER_KWH,
+     buyback_price: float = BUYBACK_PRICE_CHF_PER_KWH,
+     pv_fixed_cost: float = PV_FIXED_COST_CHF,
+     pv_site_setup_cost: float = PV_SITE_SETUP_COST_CHF,
+     pv_cost_per_panel: float = PV_COST_PER_PANEL_CHF,
+     battery_fixed_cost: float = BATTERY_FIXED_COST_CHF,
+     battery_cost_per_kwh: float = BATTERY_COST_PER_KWH_CHF,
+     energy_manager_fixed_cost: float = ENERGY_MANAGER_FIXED_COST_CHF,
+     pronovo_subsidy_chf_per_kwp: float = PRONOVO_SUBSIDY_CHF_PER_KWP,
+     tax_deduction_rate: float = TAX_DEDUCTION_RATE,
+     analysis_years: int = ANALYSIS_YEARS,
+     discount_rate: float = DISCOUNT_RATE,
+     fund_return_rate: float = FUND_RETURN_RATE,
+     annual_maintenance_rate: float = ANNUAL_MAINTENANCE_RATE,
 ) -> str:
     now = datetime.now().strftime("%Y-%m-%d")
     best = scenarios_ranked[0] if scenarios_ranked else None
@@ -701,6 +956,7 @@ def build_markdown_report(
     lines.append(f"- Batterie: DOD={battery_dod:.2f}, rendement aller-retour={battery_roundtrip_efficiency:.2f}.")
     lines.append(f"- Puissance nominale par panneau: {panel_watt_peak:.0f} Wc (gamme standard 2026).")
     lines.append("- Facteurs d'orientation PV standards: sud=1.00, est=0.92, ouest=0.92, nord=0.60.")
+    lines.append("- kWp effectif = puissance equivalente sud, ponderee par ces facteurs d'orientation.")
     lines.append("")
     lines.append("## Hypotheses economiques (marche vaudois, Suisse, 2026)")
     lines.append("")
@@ -708,30 +964,38 @@ def build_markdown_report(
     lines.append("|---|---:|---|")
     lines.append(f"| Prix achat reseau | {electricity_price * 100:.1f} ct/kWh | Tarif VD-L Romande Energie tout compris (reseau + energie + taxes) |")
     lines.append(f"| Prix reprise injection | {buyback_price * 100:.1f} ct/kWh | Retribution au prix du marche (Pronovo/swissgrid 2026) |")
-    lines.append(f"| Cout fixe installation PV | {pv_fixed_cost:.0f} CHF | Onduleur, raccordement reseau, compteur bidirectionnel, admin/permis |")
-    lines.append(f"| Cout mise en place chantier (echafaudage) | {pv_site_setup_cost:.0f} CHF | Echafaudage, protections et logistique d'acces toiture |")
-    lines.append(f"| Cout par panneau 430-450 Wc | {pv_cost_per_panel:.0f} CHF | Module premium (~170-210 CHF) + structure/montage/cablage/part variable MO (~280-320 CHF) |")
-    lines.append(f"| Cout fixe batterie | {battery_fixed_cost:.0f} CHF | BMS integre, cablage AC/DC, mise en service |")
-    lines.append(f"| Cout par kWh capacite batterie | {battery_cost_per_kwh:.0f} CHF/kWh | Technologie LFP installee, marche romand 2026 |")
-    lines.append(f"| Cout fixe repartiteur/EMS batiment | {energy_manager_fixed_cost:.0f} CHF | Pilotage PAC, gros consommateurs et recharge VE |")
+    lines.append(f"| Coût fixe installation PV | {pv_fixed_cost:.0f} CHF | Onduleur, raccordement reseau, compteur bidirectionnel, admin/permis |")
+    lines.append(f"| Coût mise en place chantier (echafaudage) | {pv_site_setup_cost:.0f} CHF | Echafaudage, protections et logistique d'acces toiture |")
+    lines.append(f"| Coût par panneau | {pv_cost_per_panel:.0f} CHF | Module premium (~170-210 CHF) + structure/montage/cablage/part variable MO (~280-320 CHF) |")
+    lines.append(f"| Coût fixe batterie | {battery_fixed_cost:.0f} CHF | BMS integre, cablage AC/DC, mise en service |")
+    lines.append(f"| Coût par kWh capacite batterie | {battery_cost_per_kwh:.0f} CHF/kWh | Technologie LFP installee, marche romand 2026 |")
+    lines.append(f"| Coût fixe repartiteur/EMS batiment | {energy_manager_fixed_cost:.0f} CHF | Pilotage PAC, gros consommateurs et recharge VE |")
+    lines.append(f"| Subvention Pronovo | {pronovo_subsidy_chf_per_kwp:.0f} CHF/kWp | Deduite du CAPEX brut selon la puissance PV installee |")
+    lines.append(f"| Deduction d'impot | {tax_deduction_rate * 100:.1f} % de la facture | Estimation deduite du CAPEX brut pour le CAPEX net |")
     lines.append(f"| Horizon d'analyse | {analysis_years} ans | Duree de vie estimee du systeme |")
     lines.append(f"| Taux d'actualisation | {discount_rate * 100:.1f} % | Taux reel (inflation deduite) |")
-    lines.append(f"| Rendement fonds alternatif | {fund_return_rate * 100:.1f} %/an | Hypothese de comparaison (cout d'opportunite du capital) |")
+    lines.append(f"| Rendement fonds alternatif | {fund_return_rate * 100:.1f} %/an | Hypothese de comparaison (coût d'opportunite du capital) |")
+    lines.append(f"| Maintenance annuelle | {annual_maintenance_rate * 100:.1f} % du CAPEX brut/an | Hypothese pour le cout de maintenance cumule sur {analysis_years} ans |")
     lines.append("")
 
     lines.append("## Configuration PV prise en compte")
     lines.append("")
     if best is None:
         lines.append("Aucune configuration PV n'a pu etre calculee.")
-    elif pv_mode == "panel_layout":
+    elif pv_mode in ("panel_layout", "panel_variants"):
+        limits = panel_limits or {
+            "north": best["pv_panels_north"],
+            "south": best["pv_panels_south"],
+            "east": best["pv_panels_east"],
+            "west": best["pv_panels_west"],
+        }
         lines.append(
-            f"- Panneaux installables fournis: **N={best['pv_panels_north']} ; S={best['pv_panels_south']} ; "
-            f"E={best['pv_panels_east']} ; O={best['pv_panels_west']}**."
+            f"- Panneaux installables fournis: **N={limits.get('north', 0)} ; S={limits.get('south', 0)} ; "
+            f"E={limits.get('east', 0)} ; O={limits.get('west', 0)}**."
         )
-        lines.append(f"- Total panneaux installables simules: **{best['pv_total_panels']}**.")
-        lines.append(f"- Puissance PV totale correspondante: **{best['pv_kwp']:.2f} kWp**.")
-    else:
-        lines.append("- Mode legacy: liste de puissances PV equivalentes sud (`--pv-kwp-list`).")
+        if pv_variant_count is not None:
+            lines.append(f"- Variantes PV testees (reduction panneau par panneau): **{pv_variant_count}**.")
+        lines.append(f"- Exemple de configuration retenue dans les resultats: **{best['pv_total_panels']} panneaux ({best['pv_kwp']:.2f} kWp)**.")
     lines.append("")
 
     lines.append("## Qualite et couverture des donnees")
@@ -766,14 +1030,14 @@ def build_markdown_report(
     lines.append("## Scenarios PV+batterie (classement energetique)")
     lines.append("")
     lines.append(
-        "| Rang | PV (kWp) | Batterie (kWh) | Batterie utile (kWh) | "
+        "| Rang | EMS | PV (kWp) | PV effectif (kWp eq. sud) | Batterie (kWh) | Batterie utile (kWh) | "
         "Panneaux | Orientation | Autoconsommation PV | Couverture conso | Import reseau (kWh) | Export reseau (kWh) |"
     )
-    lines.append("|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|")
+    lines.append("|---:|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|")
 
     for idx, row in enumerate(scenarios_ranked[:top_n_scenarios], start=1):
         lines.append(
-            f"| {idx} | {fmt(row['pv_kwp'], 2)} | {fmt(row['battery_kwh'], 2)} | "
+            f"| {idx} | {'Oui' if row.get('energy_manager_enabled', False) else 'Non'} | {fmt(row['pv_kwp'], 2)} | {fmt(row['pv_effective_kwp'], 2)} | {fmt(row['battery_kwh'], 2)} | "
             f"{fmt(row['battery_usable_kwh'], 2)} | {row['pv_total_panels']} | {row['pv_orientation_summary']} | "
             f"{to_percent(row['auto_consumption_rate'])} | "
             f"{to_percent(row['self_sufficiency_rate'])} | {fmt(row['grid_import_kwh'], 1)} | "
@@ -784,10 +1048,10 @@ def build_markdown_report(
     lines.append("## Scenarios PV+batterie (analyse economique)")
     lines.append("")
     lines.append(
-        "| Rang | PV (kWp) | Batterie (kWh) | CAPEX PV (CHF) | CAPEX Bat. (CHF) | CAPEX EMS (CHF) | CAPEX total (CHF) | "
+        "| Rang | EMS | PV (kWp) | PV effectif (kWp eq. sud) | Batterie (kWh) | CAPEX PV (CHF) | CAPEX Bat. (CHF) | CAPEX EMS (CHF) | CAPEX brut (CHF) | Pronovo (CHF) | Deduction impot (CHF) | CAPEX apres reduction (CHF) | "
         f"Economies nettes/an (CHF) | Retour invest. (ans) | VAN {analysis_years} ans (CHF) |"
     )
-    lines.append("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
 
     for idx, row in enumerate(scenarios_ranked[:top_n_scenarios], start=1):
         payback_str = (
@@ -796,122 +1060,83 @@ def build_markdown_report(
             else "> horizon"
         )
         lines.append(
-            f"| {idx} | {fmt(row['pv_kwp'], 2)} | {fmt(row['battery_kwh'], 2)} | "
-            f"{fmt(row['capex_pv_chf'], 0)} | {fmt(row['capex_battery_chf'], 0)} | {fmt(row['capex_energy_manager_chf'], 0)} | {fmt(row['capex_total_chf'], 0)} | "
+            f"| {idx} | {'Oui' if row.get('energy_manager_enabled', False) else 'Non'} | {fmt(row['pv_kwp'], 2)} | {fmt(row['pv_effective_kwp'], 2)} | {fmt(row['battery_kwh'], 2)} | "
+            f"{fmt(row['capex_pv_chf'], 0)} | {fmt(row['capex_battery_chf'], 0)} | {fmt(row['capex_energy_manager_chf'], 0)} | {fmt(row['capex_before_reductions_chf'], 0)} | "
+            f"{fmt(row['pronovo_subsidy_chf'], 0)} | {fmt(row['tax_deduction_chf'], 0)} | {fmt(row['capex_after_reductions_chf'], 0)} | "
             f"{fmt(row['annual_net_savings_chf'], 0)} | {payback_str} | {fmt(row['npv_chf'], 0)} |"
         )
 
-    lines.append("")
-    lines.append("## Comparaison vs investissement en fonds")
-    lines.append("")
-    lines.append(
-        f"| Rang | CAPEX total (CHF) | FV fonds ({analysis_years} ans, {fund_return_rate * 100:.1f}%/an) | "
-        f"FV economies PV ({analysis_years} ans) | Ecart PV - fonds (CHF) |"
-    )
-    lines.append("|---:|---:|---:|---:|---:|")
-    for idx, row in enumerate(scenarios_ranked[:top_n_scenarios], start=1):
-        lines.append(
-            f"| {idx} | {fmt(row['capex_total_chf'], 0)} | {fmt(row['fund_future_value_chf'], 0)} | "
-            f"{fmt(row['pv_savings_future_value_chf'], 0)} | {fmt(row['opportunity_delta_vs_fund_chf'], 0)} |"
-        )
+    # lines.append("")
+    # lines.append("## Comparaison vs investissement en fonds")
+    # lines.append("")
+    # lines.append(
+    #     f"| Rang | CAPEX apres reduction (CHF) | FV fonds ({analysis_years} ans, {fund_return_rate * 100:.1f}%/an) | "
+    #     f"FV economies PV ({analysis_years} ans) | Ecart PV - fonds (CHF) |"
+    # )
+    # lines.append("|---:|---:|---:|---:|---:|")
+    # for idx, row in enumerate(scenarios_ranked[:top_n_scenarios], start=1):
+    #     lines.append(
+    #         f"| {idx} | {fmt(row['capex_total_chf'], 0)} | {fmt(row['fund_future_value_chf'], 0)} | "
+    #         f"{fmt(row['pv_savings_future_value_chf'], 0)} | {fmt(row['opportunity_delta_vs_fund_chf'], 0)} |"
+    #     )
 
     lines.append("")
-    lines.append("## Recommandation (selon ce modele simplifie)")
+    lines.append("## Variantes de solution par profil")
     lines.append("")
-    if best is None:
-        lines.append("Aucun scenario n'a pu etre calcule.")
+    lines.append(
+        f"Chaque tableau contient: l'optimum du profil, les 3 variantes minimales imposees "
+        f"(batterie sans EMS, batterie avec EMS, sans batterie sans EMS), puis {n_below_optimum} "
+        "solutions juste en dessous de l'optimum."
+    )
+    lines.append("")
+    if not profile_variant_lists:
+        lines.append("Aucune variante de profil n'a pu etre construite.")
     else:
-        lines.append("### Synthèse: Trois profils d'utilisateurs")
-        lines.append("")
-        lines.append("Le tableau suivant résume les recommandations optimales selon 3 profils décisionnels distincts:")
-        lines.append("")
-        lines.append("| Profil | Priorité | Recommandation PV+Batterie | Auto-conso | Autonomie | Payback | VAN 25 ans |")
-        lines.append("|---|---|---|---:|---:|---:|---:|")
-        
-        if best_scenarios:
-            for profile, name, priority in [
-                ("autonomy", "**Autonomiste**", "Maximiser autonomie & auto-consommation"),
-                ("financial", "**Financier**", "Maximiser VAN 25 ans"),
-                ("ecological", "**Écolo**", "Minimiser temps d'amortissement"),
-            ]:
-                if profile in best_scenarios:
-                    s = best_scenarios[profile]
-                    payback_str = f"{s['payback_years']:.1f} ans" if s["payback_years"] != float("inf") else "> horizon"
-                    lines.append(
-                        f"| {name} | {priority} | "
-                        f"{s['pv_kwp']:.2f} kWp + {s['battery_kwh']:.1f} kWh | "
-                        f"{s['auto_consumption_rate']*100:.1f}% | {s['self_sufficiency_rate']*100:.1f}% | "
-                        f"{payback_str} | {s['npv_chf']:.0f} CHF |"
-                    )
-        
-        lines.append("")
-        lines.append("### Détail par profil")
-        lines.append("")
-        
-        # Profil Autonomiste
-        lines.append("#### 1️⃣ Profil AUTONOMISTE (maximiser autonomie énergétique)")
-        lines.append("")
-        if best_scenarios and "autonomy" in best_scenarios:
-            s = best_scenarios["autonomy"]
-            payback_str = f"{s['payback_years']:.1f} ans" if s["payback_years"] != float("inf") else "superieur a l'horizon d'analyse"
-            lines.append(f"- **Configuration recommandée**: {s['pv_kwp']:.2f} kWp PV + {s['battery_kwh']:.1f} kWh batterie (~{s['pv_total_panels']} panneaux).")
-            lines.append(f"- **Répartition panneaux**: {s['pv_orientation_summary']}.")
-            lines.append(f"- **Auto-consommation estimée**: {s['auto_consumption_rate']*100:.1f}% (taux de réutilisation de sa propre production).")
-            lines.append(f"- **Autonomie énergétique estimée**: {s['self_sufficiency_rate']*100:.1f}% (couverture de la consommation sans réseau).")
-            lines.append(f"- **CAPEX total**: {s['capex_total_chf']:.0f} CHF (PV: {s['capex_pv_chf']:.0f} CHF, batterie: {s['capex_battery_chf']:.0f} CHF).")
-            lines.append(f"- **Repartiteur/EMS**: {s['capex_energy_manager_chf']:.0f} CHF (inclus dans le CAPEX total).")
-            lines.append(f"- **Économies nettes annuelles**: {s['annual_net_savings_chf']:.0f} CHF/an.")
-            lines.append(f"- **Retour investissement**: {payback_str}.")
-            lines.append(f"- **VAN 25 ans**: {s['npv_chf']:.0f} CHF.")
+        profile_labels = {
+            "autonomy": "Autonomiste (tri: autonomie puis VAN)",
+            "financial": "Financier (tri: VAN + capital puis payback)",
+            "ecological": "Ecologiste (tri: payback puis VAN)",
+        }
+        for profile in ("autonomy", "financial", "ecological"):
+            rows = profile_variant_lists.get(profile, [])
+            lines.append(f"### Profil {profile_labels[profile]}")
             lines.append("")
-            lines.append("**Intérêt**: Minimise la dépendance réseau, idéal pour l'indépendance énergétique.")
-        
-        # Profil Financier
-        lines.append("")
-        lines.append("#### 2️⃣ Profil FINANCIER (maximiser le rendement VAN)")
-        lines.append("")
-        if best_scenarios and "financial" in best_scenarios:
-            s = best_scenarios["financial"]
-            payback_str = f"{s['payback_years']:.1f} ans" if s["payback_years"] != float("inf") else "superieur a l'horizon d'analyse"
-            lines.append(f"- **Configuration recommandée**: {s['pv_kwp']:.2f} kWp PV + {s['battery_kwh']:.1f} kWh batterie (~{s['pv_total_panels']} panneaux).")
-            lines.append(f"- **Répartition panneaux**: {s['pv_orientation_summary']}.")
-            lines.append(f"- **Auto-consommation estimée**: {s['auto_consumption_rate']*100:.1f}%.")
-            lines.append(f"- **Autonomie énergétique estimée**: {s['self_sufficiency_rate']*100:.1f}%.")
-            lines.append(f"- **CAPEX total**: {s['capex_total_chf']:.0f} CHF (PV: {s['capex_pv_chf']:.0f} CHF, batterie: {s['capex_battery_chf']:.0f} CHF).")
-            lines.append(f"- **Repartiteur/EMS**: {s['capex_energy_manager_chf']:.0f} CHF (inclus dans le CAPEX total).")
-            lines.append(f"- **Économies nettes annuelles**: {s['annual_net_savings_chf']:.0f} CHF/an.")
-            lines.append(f"- **Retour investissement**: {payback_str}.")
-            lines.append(f"- **VAN 25 ans** (taux 3.0%): **{s['npv_chf']:.0f} CHF** ← MEILLEURE PERFORMANCE FINANCIÈRE.")
-            if s["opportunity_delta_vs_fund_chf"] >= 0:
-                lines.append(f"- **vs. fonds 3.0%/an**: PV favorable de {s['opportunity_delta_vs_fund_chf']:.0f} CHF sur 25 ans (valeur future).")
+            lines.append(
+                "| Rang profil | Type | Config PV | PV effectif (kWp eq. sud) | Batterie (kWh) | EMS | Autoconsommation | Autonomie | VAN (CHF) | Investissement initial (CHF) | Subvention/deduction (CHF) | Cout maintenance total (CHF) | Capital non-dépensé (CHF) | VAN + Capital (CHF) | Payback (ans) |"
+            )
+            lines.append("|---:|---|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+            if not rows:
+                lines.append("| - | - | - | - | - | - | - | - | - | - | - | - | - | - | - |")
+                lines.append("")
+                continue
+
+            optimum = rows[0]
+            for idx, s in enumerate(rows, start=1):
+                payback_str = f"{s['payback_years']:.1f}" if s["payback_years"] != float("inf") else "> horizon"
+                row_type = str(s.get("selection_reason", "alternative"))
+                capital_not_spent = s.get("capital_not_spent_value_chf", 0.0)
+                npv_plus_capital = s.get("npv_plus_capital_chf", s.get("npv_chf", 0.0))
+                initial_investment = s.get("initial_investment_chf", s.get("capex_total_chf", 0.0))
+                reductions = s.get("capex_total_reductions_chf", 0.0)
+                maintenance_total = s.get("maintenance_cost_total_chf", 0.0)
+
+                lines.append(
+                    f"| {idx} | {row_type} | {s['pv_orientation_summary']} ({s['pv_total_panels']} panneaux / {s['pv_kwp']:.2f} kWp) | "
+                    f"{fmt(s.get('pv_effective_kwp'), 2)} | {s['battery_kwh']:.1f} | {'Oui' if s.get('energy_manager_enabled', False) else 'Non'} | "
+                    f"{s['auto_consumption_rate']*100:.1f}% | {s['self_sufficiency_rate']*100:.1f}% | {s['npv_chf']:.0f} | "
+                    f"{fmt(initial_investment, 0)} | {fmt(reductions, 0)} | {fmt(maintenance_total, 0)} | {fmt(capital_not_spent, 0)} | {fmt(npv_plus_capital, 0)} | {payback_str} |"
+                )
+
+            # Aide a la lecture: explique pourquoi un optimum peut avoir moins de panneaux.
+            pv_max = float(max(float(r["pv_kwp"]) for r in rows))
+            optimum_pv_kwp = float(optimum["pv_kwp"])
+            if optimum_pv_kwp + 1e-9 < pv_max:
+                lines.append("")
+                lines.append(
+                    f"- Lecture: l'optimum de ce profil ({fmt(optimum_pv_kwp, 2)} kWp) est inferieur au maximum "
+                    f"presente ({fmt(pv_max, 2)} kWp), car son critere prioritaire est mieux servi a ce niveau."
+                )
             lines.append("")
-            lines.append("**Intérêt**: Meilleur retour sur investissement à long terme (25 ans), tenant compte de l'inflation actualisée.")
-        
-        # Profil Écolo
-        lines.append("")
-        lines.append("#### 3️⃣ Profil ÉCOLO (minimiser durée d'impact de consommation de ressources)")
-        lines.append("")
-        if best_scenarios and "ecological" in best_scenarios:
-            s = best_scenarios["ecological"]
-            payback_str = f"{s['payback_years']:.1f} ans" if s["payback_years"] != float("inf") else "superieur a l'horizon d'analyse"
-            lines.append(f"- **Configuration recommandée**: {s['pv_kwp']:.2f} kWp PV + {s['battery_kwh']:.1f} kWh batterie (~{s['pv_total_panels']} panneaux).")
-            lines.append(f"- **Répartition panneaux**: {s['pv_orientation_summary']}.")
-            lines.append(f"- **Auto-consommation estimée**: {s['auto_consumption_rate']*100:.1f}%.")
-            lines.append(f"- **Autonomie énergétique estimée**: {s['self_sufficiency_rate']*100:.1f}%.")
-            lines.append(f"- **CAPEX total**: {s['capex_total_chf']:.0f} CHF (PV: {s['capex_pv_chf']:.0f} CHF, batterie: {s['capex_battery_chf']:.0f} CHF).")
-            lines.append(f"- **Repartiteur/EMS**: {s['capex_energy_manager_chf']:.0f} CHF (inclus dans le CAPEX total).")
-            lines.append(f"- **Économies nettes annuelles**: {s['annual_net_savings_chf']:.0f} CHF/an.")
-            lines.append(f"- **Retour investissement** ← **{payback_str}** (PLUS RAPIDE).")
-            lines.append(f"- **VAN 25 ans**: {s['npv_chf']:.0f} CHF.")
-            lines.append("")
-            lines.append("**Intérêt**: Rembourse l'investissement (ressources) le plus rapidement, minimisant l'impact écologique net de la ressource investie.")
-        
-        lines.append("")
-        lines.append("### Conseil récapitulatif")
-        lines.append("")
-        lines.append("- Cette recommandation est un **pré-dimensionnement** énergétique et financier.")
-        lines.append("- À affiner avec: inclinaison/orientation réelles, ombrage local, contraintes onduleur/batterie en kW, devis spécifiques.")
-        lines.append("- Choisir le profil en fonction de vos priorités personnelles: indépendance (autonomiste), rendement (financier), ou impact écologique (écolo).")
 
     lines.append("")
     lines.append("## Limites et ameliorations proposees")
@@ -941,8 +1166,8 @@ def main() -> int:
     parser.add_argument("--json-output", default=None, help="Chemin optionnel de sortie JSON")
     parser.add_argument(
         "--pv-kwp-list",
-        default="5,10,15,20,25",
-        help="Liste PV kWp separee par virgules",
+        default="3,6,9,12,15",
+        help="Liste puissances PV kWp separee par virgules (utilisee seulement sans configuration panneaux)",
     )
     parser.add_argument(
         "--battery-kwh-list",
@@ -964,7 +1189,7 @@ def main() -> int:
     parser.add_argument(
         "--panel-watt-peak",
         type=float,
-        default=430.0,
+        default=490.0,
         help="Puissance nominale d'un panneau standard 2026 (Wc)",
     )
     parser.add_argument(
@@ -978,10 +1203,22 @@ def main() -> int:
     parser.add_argument("--panels-east", type=parse_non_negative_int, default=0, help="Nombre de panneaux installables a l'est")
     parser.add_argument("--panels-west", type=parse_non_negative_int, default=0, help="Nombre de panneaux installables a l'ouest")
     parser.add_argument(
+        "--min-total-panels",
+        type=parse_non_negative_int,
+        default=4,
+        help="Nombre minimal de panneaux total a simuler en mode variantes de toiture",
+    )
+    parser.add_argument(
         "--top-n-scenarios",
         type=int,
         default=12,
         help="Nombre de scenarios affiches dans le rapport",
+    )
+    parser.add_argument(
+        "--n-below-optimum",
+        type=int,
+        default=3,
+        help="Nombre d'alternatives a afficher juste en dessous de l'optimum par profil",
     )
     # === Paramètres économiques (surcharge optionnelle des constantes) ===
     parser.add_argument(
@@ -1000,37 +1237,49 @@ def main() -> int:
         "--pv-fixed-cost",
         type=float,
         default=PV_FIXED_COST_CHF,
-        help=f"Cout fixe installation PV en CHF (defaut: {PV_FIXED_COST_CHF})",
+        help=f"Coût fixe installation PV en CHF (defaut: {PV_FIXED_COST_CHF})",
     )
     parser.add_argument(
         "--pv-site-setup-cost",
         type=float,
         default=PV_SITE_SETUP_COST_CHF,
-        help=f"Cout mise en place chantier (echafaudage) en CHF (defaut: {PV_SITE_SETUP_COST_CHF})",
+        help=f"Coût mise en place chantier (echafaudage) en CHF (defaut: {PV_SITE_SETUP_COST_CHF})",
     )
     parser.add_argument(
         "--pv-cost-per-panel",
         type=float,
         default=PV_COST_PER_PANEL_CHF,
-        help=f"Cout par panneau en CHF (defaut: {PV_COST_PER_PANEL_CHF})",
+        help=f"Coût par panneau en CHF (defaut: {PV_COST_PER_PANEL_CHF})",
     )
     parser.add_argument(
         "--battery-fixed-cost",
         type=float,
         default=BATTERY_FIXED_COST_CHF,
-        help=f"Cout fixe batterie en CHF (defaut: {BATTERY_FIXED_COST_CHF})",
+        help=f"Coût fixe batterie en CHF (defaut: {BATTERY_FIXED_COST_CHF})",
     )
     parser.add_argument(
         "--battery-cost-per-kwh",
         type=float,
         default=BATTERY_COST_PER_KWH_CHF,
-        help=f"Cout par kWh capacite batterie en CHF (defaut: {BATTERY_COST_PER_KWH_CHF})",
+        help=f"Coût par kWh capacite batterie en CHF (defaut: {BATTERY_COST_PER_KWH_CHF})",
     )
     parser.add_argument(
         "--energy-manager-fixed-cost",
         type=float,
         default=ENERGY_MANAGER_FIXED_COST_CHF,
-        help=f"Cout fixe repartiteur/EMS batiment en CHF (defaut: {ENERGY_MANAGER_FIXED_COST_CHF})",
+        help=f"Coût fixe repartiteur/EMS batiment en CHF (defaut: {ENERGY_MANAGER_FIXED_COST_CHF})",
+    )
+    parser.add_argument(
+        "--pronovo-subsidy-chf-per-kwp",
+        type=float,
+        default=PRONOVO_SUBSIDY_CHF_PER_KWP,
+        help=f"Subvention Pronovo en CHF/kWp installe (defaut: {PRONOVO_SUBSIDY_CHF_PER_KWP})",
+    )
+    parser.add_argument(
+        "--tax-deduction-rate",
+        type=float,
+        default=TAX_DEDUCTION_RATE,
+        help=f"Deduction d'impot appliquee a la facture brute (defaut: {TAX_DEDUCTION_RATE})",
     )
     parser.add_argument(
         "--analysis-years",
@@ -1050,12 +1299,25 @@ def main() -> int:
         default=FUND_RETURN_RATE,
         help=f"Rendement annuel du fonds alternatif (defaut: {FUND_RETURN_RATE})",
     )
+    parser.add_argument(
+        "--annual-maintenance-rate",
+        type=float,
+        default=ANNUAL_MAINTENANCE_RATE,
+        help=f"Maintenance annuelle exprimee en %% du CAPEX brut (defaut: {ANNUAL_MAINTENANCE_RATE})",
+    )
     args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(levelname)s] %(message)s",
+    )
+
 
     input_csv = Path(args.input_csv)
     output_md = Path(args.output)
     output_json = Path(args.json_output) if args.json_output else None
 
+    logger.info("Lecture et aggrégation des données de consommation")
     records = parse_csv(input_csv)
     hour_records = build_hourly_records(records)
     completeness = compute_month_completeness(records)
@@ -1064,34 +1326,69 @@ def main() -> int:
     pv_kwp_values = parse_float_list(args.pv_kwp_list)
     battery_kwh_values = parse_float_list(args.battery_kwh_list)
     panel_counts = build_panel_counts(args.panels_north, args.panels_south, args.panels_east, args.panels_west)
-    pv_configs, pv_mode = build_pv_configs(pv_kwp_values, panel_counts, args.panel_watt_peak)
+    pv_configs, pv_mode = build_pv_configs(
+        pv_kwp_values,
+        panel_counts,
+        args.panel_watt_peak,
+        min_total_panels=args.min_total_panels,
+    )
+
+    logger.info("Pre-calcul des profils de production PV pour chaque configuration")
+
+    # Cache majeur de performance: la production PV depend uniquement de la config toiture.
+    pv_generation_cache = {}
+    for idx, pv_config in enumerate(pv_configs, start=1):
+        pv_generation_cache[pv_config.name] = build_pv_generation_series(records, pv_config, args.roof_tilt_deg)
+        print_progress(idx, len(pv_configs), prefix="Cache PV")
+
+    total_scenarios = len(pv_configs) * len(battery_kwh_values) * 2
 
     scenarios: list[dict[str, Any]] = []
+    processed_scenarios = 0
     for pv_config in pv_configs:
         for batt_kwh in battery_kwh_values:
-            scenarios.append(
-                simulate_scenario(
-                    quarter_records=records,
-                    pv_config=pv_config,
-                    battery_kwh=batt_kwh,
-                    battery_dod=args.battery_dod,
-                    battery_roundtrip_efficiency=args.battery_roundtrip_efficiency,
-                    roof_tilt_deg=args.roof_tilt_deg,
-                    electricity_price=args.electricity_price,
-                    buyback_price=args.buyback_price,
-                    pv_fixed_cost=args.pv_fixed_cost,
-                    pv_site_setup_cost=args.pv_site_setup_cost,
-                    pv_cost_per_panel=args.pv_cost_per_panel,
-                    battery_fixed_cost=args.battery_fixed_cost,
-                    battery_cost_per_kwh=args.battery_cost_per_kwh,
-                    energy_manager_fixed_cost=args.energy_manager_fixed_cost,
-                    analysis_years=args.analysis_years,
-                    discount_rate=args.discount_rate,
-                    fund_return_rate=args.fund_return_rate,
+            for ems_enabled in (False, True):
+                scenarios.append(
+                    simulate_scenario(
+                        quarter_records=records,
+                        pv_config=pv_config,
+                        battery_kwh=batt_kwh,
+                        battery_dod=args.battery_dod,
+                        battery_roundtrip_efficiency=args.battery_roundtrip_efficiency,
+                        roof_tilt_deg=args.roof_tilt_deg,
+                        electricity_price=args.electricity_price,
+                        buyback_price=args.buyback_price,
+                        pv_fixed_cost=args.pv_fixed_cost,
+                        pv_site_setup_cost=args.pv_site_setup_cost,
+                        pv_cost_per_panel=args.pv_cost_per_panel,
+                        battery_fixed_cost=args.battery_fixed_cost,
+                        battery_cost_per_kwh=args.battery_cost_per_kwh,
+                        energy_manager_enabled=ems_enabled,
+                        energy_manager_fixed_cost=args.energy_manager_fixed_cost,
+                        pronovo_subsidy_chf_per_kwp=args.pronovo_subsidy_chf_per_kwp,
+                        tax_deduction_rate=args.tax_deduction_rate,
+                        analysis_years=args.analysis_years,
+                        discount_rate=args.discount_rate,
+                        fund_return_rate=args.fund_return_rate,
+                        annual_maintenance_rate=args.annual_maintenance_rate,
+                        pv_generation_series=pv_generation_cache[pv_config.name],
+                    )
                 )
-            )
+                processed_scenarios += 1
+                print_progress(processed_scenarios, total_scenarios, prefix="Simulation")
+    scenarios = enrich_scenarios_with_capital_value(
+        scenarios,
+        analysis_years=args.analysis_years,
+        fund_return_rate=args.fund_return_rate,
+    )
+    scenarios = enrich_scenarios_with_capital_value(
+        scenarios,
+        analysis_years=args.analysis_years,
+        fund_return_rate=args.fund_return_rate,
+    )
     ranked = rank_scenarios(scenarios)
     best_scenarios = find_best_scenarios(ranked)
+    profile_variant_lists = build_profile_variant_lists(ranked, args.n_below_optimum)
 
     build_markdown_report(
         input_csv=input_csv,
@@ -1105,7 +1402,11 @@ def main() -> int:
         battery_roundtrip_efficiency=args.battery_roundtrip_efficiency,
         top_n_scenarios=args.top_n_scenarios,
         pv_mode=pv_mode,
+        panel_limits=panel_counts,
+        pv_variant_count=len(pv_configs) if pv_mode == "panel_variants" else None,
         best_scenarios=best_scenarios,
+        profile_variant_lists=profile_variant_lists,
+        n_below_optimum=args.n_below_optimum,
         electricity_price=args.electricity_price,
         buyback_price=args.buyback_price,
         pv_fixed_cost=args.pv_fixed_cost,
@@ -1114,9 +1415,12 @@ def main() -> int:
         battery_fixed_cost=args.battery_fixed_cost,
         battery_cost_per_kwh=args.battery_cost_per_kwh,
         energy_manager_fixed_cost=args.energy_manager_fixed_cost,
+        pronovo_subsidy_chf_per_kwp=args.pronovo_subsidy_chf_per_kwp,
+        tax_deduction_rate=args.tax_deduction_rate,
         analysis_years=args.analysis_years,
         discount_rate=args.discount_rate,
         fund_return_rate=args.fund_return_rate,
+        annual_maintenance_rate=args.annual_maintenance_rate,
     )
 
     if output_json is not None:
@@ -1146,9 +1450,12 @@ def main() -> int:
                             "battery_fixed_cost_chf": args.battery_fixed_cost,
                             "battery_cost_per_kwh_chf": args.battery_cost_per_kwh,
                             "energy_manager_fixed_cost_chf": args.energy_manager_fixed_cost,
+                            "pronovo_subsidy_chf_per_kwp": args.pronovo_subsidy_chf_per_kwp,
+                            "tax_deduction_rate": args.tax_deduction_rate,
                             "analysis_years": args.analysis_years,
                             "discount_rate": args.discount_rate,
                             "fund_return_rate": args.fund_return_rate,
+                            "annual_maintenance_rate": args.annual_maintenance_rate,
                         },
                     },
                     "month_completeness": completeness,
@@ -1161,6 +1468,16 @@ def main() -> int:
                         }
                         for profile, scenario in best_scenarios.items()
                     } if best_scenarios else {},
+                    "profile_variant_lists": {
+                        profile: [
+                            {
+                                k: v for k, v in scenario.items()
+                                if k not in ["pv_config_name"]
+                            }
+                            for scenario in variants
+                        ]
+                        for profile, variants in profile_variant_lists.items()
+                    } if profile_variant_lists else {},
                 },
                 ensure_ascii=False,
                 indent=2,

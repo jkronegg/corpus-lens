@@ -96,6 +96,7 @@ class AnalyseConsommationPvBatterieTests(unittest.TestCase):
         self.assertAlmostEqual(pv_configs[0].total_kwp, 28 * 430.0 / 1000.0, places=6)
 
 
+
 if __name__ == "__main__":
     unittest.main()
 
