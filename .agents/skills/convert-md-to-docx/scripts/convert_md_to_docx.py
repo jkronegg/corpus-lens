@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 from pathlib import Path
 
@@ -16,6 +17,65 @@ from docx.shared import Cm
 
 # Décale toutes les listes d'environ 1 cm vers la droite.
 LIST_BASE_INDENT_CM = 1.0
+DEFAULT_AUTHOR = os.getenv('CORPUS_LENS_AUTHOR', 'Julien')
+
+
+def normalize_metadata_text(value: str | None, max_length: int = 255) -> str:
+    """Nettoyer une valeur de métadonnée en évitant les chaînes trop longues."""
+    if not value:
+        return ''
+    cleaned = re.sub(r'\s+', ' ', value).strip()
+    if len(cleaned) > max_length:
+        cleaned = cleaned[: max_length - 3].rstrip() + '...'
+    return cleaned
+
+
+def parse_front_matter(content: str) -> dict[str, object]:
+    """Extraire les métadonnées YAML en tête de document si présentes."""
+    metadata: dict[str, object] = {}
+    if not content.startswith('---'):
+        return metadata
+
+    lines = content.splitlines()
+    if len(lines) < 3:
+        return metadata
+
+    end_index = None
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() == '---':
+            end_index = idx
+            break
+    if end_index is None:
+        return metadata
+
+    for raw_line in lines[1:end_index]:
+        if ':' not in raw_line:
+            continue
+        key, value = raw_line.split(':', 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if value in {'', "''", '""'}:
+            metadata[key.lower()] = ''
+        else:
+            metadata[key.lower()] = value.strip("\"'")
+    return metadata
+
+
+def strip_front_matter(content: str) -> str:
+    """Retourner le corps Markdown sans le front matter YAML initial."""
+    if not content.startswith('---'):
+        return content
+
+    lines = content.splitlines()
+    if len(lines) < 3:
+        return content
+
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() == '---':
+            return '\n'.join(lines[idx + 1 :])
+    return content
 
 
 def is_blockquote_line(line: str) -> bool:
@@ -29,6 +89,136 @@ def get_blockquote_content(line: str) -> str:
     if content.startswith(' '):
         return content[1:]
     return content
+
+
+def extract_markdown_title(lines: list[str], front_matter: dict[str, object] | None = None) -> str:
+    """Extraire le titre principal du Markdown, ou une valeur de secours."""
+    if front_matter:
+        for key in ('title', 'document_title', 'nom'):
+            value = front_matter.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('# '):
+            return stripped[2:].strip()
+        if stripped.startswith('## '):
+            return stripped[3:].strip()
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith('#') and not stripped.startswith('>'):
+            return stripped
+    return 'Document'
+
+
+def extract_document_summary(lines: list[str], title: str, front_matter: dict[str, object] | None = None) -> str:
+    """Créer un résumé à partir du texte du document."""
+    if front_matter:
+        for key in ('summary', 'description', 'abstract', 'resume'):
+            value = front_matter.get(key)
+            if isinstance(value, str) and value.strip():
+                return normalize_metadata_text(value, 255)
+
+    candidates: list[str] = []
+    in_keywords_section = False
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.lower().startswith('# mots clés') or stripped.lower().startswith('## mots clés'):
+            in_keywords_section = True
+            continue
+        if in_keywords_section:
+            if stripped.startswith('- ') or stripped.startswith('* '):
+                continue
+            if stripped.startswith('#'):
+                in_keywords_section = False
+        if stripped.startswith('#'):
+            continue
+        if stripped.startswith('>'):
+            continue
+        if stripped.startswith('- ') or stripped.startswith('* '):
+            continue
+        candidates.append(stripped)
+        if len(candidates) >= 3:
+            break
+
+    if candidates:
+        summary = ' '.join(candidates)
+        summary = re.sub(r'\s+', ' ', summary)
+        return normalize_metadata_text(summary, 255)
+
+    if title and title != 'Document':
+        return normalize_metadata_text(f"Document consacré à {title}.", 255)
+    return 'Document préparé pour consultation et analyse.'
+
+
+def extract_document_keywords(lines: list[str], title: str, front_matter: dict[str, object] | None = None) -> list[str]:
+    """Extraire les mots-clés depuis le front matter ou la section Markdown dédiée."""
+    if front_matter:
+        for key in ('keywords', 'tags', 'mots_cles', 'mots-clés'):
+            value = front_matter.get(key)
+            if isinstance(value, str):
+                parsed = [item.strip().strip(',.;:!') for item in value.split(',') if item.strip()]
+                if parsed:
+                    return parsed[:10]
+            elif isinstance(value, list):
+                parsed = [str(item).strip() for item in value if str(item).strip()]
+                if parsed:
+                    return parsed[:10]
+
+    keywords: list[str] = []
+    in_keywords_section = False
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            if in_keywords_section:
+                break
+            continue
+        if stripped.lower().startswith('# mots clés') or stripped.lower().startswith('## mots clés'):
+            in_keywords_section = True
+            continue
+        if in_keywords_section:
+            if stripped.startswith('- ') or stripped.startswith('* '):
+                item = stripped[2:].strip()
+                if item:
+                    keywords.append(item)
+                continue
+            if stripped.startswith('#'):
+                break
+        if stripped.startswith('- ') or stripped.startswith('* '):
+            item = stripped[2:].strip()
+            if item:
+                keywords.append(item)
+
+    if keywords:
+        unique_keywords: list[str] = []
+        seen: set[str] = set()
+        for keyword in keywords:
+            normalized = keyword.strip().strip(',.;:!')
+            if normalized and normalized.lower() not in seen:
+                unique_keywords.append(normalized)
+                seen.add(normalized.lower())
+        return unique_keywords[:10]
+
+    fallback = re.split(r'\s+|[-–—]', title.strip()) if title else []
+    clean_fallback = [token.strip('.,;:!?”\'()[]{}') for token in fallback if token and len(token) > 2]
+    if clean_fallback:
+        return clean_fallback[:8]
+    return ['document', 'markdown', 'analyse']
+
+
+def extract_document_author(front_matter: dict[str, object] | None = None) -> str:
+    """Extraire le nom de l'auteur depuis le front matter ou la configuration de l'environnement."""
+    if front_matter:
+        for key in ('author', 'auteur', 'creator', 'created_by'):
+            value = front_matter.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return DEFAULT_AUTHOR
 
 
 def format_quote_paragraph(paragraph) -> None:
@@ -73,7 +263,7 @@ def add_hyperlink(paragraph, text: str, url: str, force_italic: bool = False) ->
 
 def add_formatted_text(paragraph, text: str, force_italic: bool = False) -> None:
     """Ajouter du texte formaté (gras, italique, liens, code) à un paragraphe."""
-    pattern = r'(\*\*.*?\*\*|\*.*?\*|\[.*?\]\(.*?\)|`.*?`)'
+    pattern = r'(\*\*.*?\*\*|\*.*?\*|\[.*?\]\(.*?\)|`.*?`)' 
     parts = re.split(pattern, text)
 
     for part in parts:
@@ -110,9 +300,20 @@ def parse_markdown_to_docx(md_file: str, docx_file: str) -> None:
     with open(md_file, 'r', encoding='utf-8') as f:
         content = f.read()
 
+    front_matter = parse_front_matter(content)
+    markdown_body = strip_front_matter(content)
+    lines = markdown_body.split('\n')
+    title = extract_markdown_title(lines, front_matter)
+    summary = extract_document_summary(lines, title, front_matter)
+    keywords = extract_document_keywords(lines, title, front_matter)
+    author = extract_document_author(front_matter)
+
     doc = Document()
-    lines = content.split('\n')
-    i = 0
+    doc.core_properties.author = author
+    doc.core_properties.title = normalize_metadata_text(title, 255)
+    doc.core_properties.subject = summary
+    doc.core_properties.keywords = ', '.join(keywords)
+
     paragraph_buffer: list[str] = []
 
     def flush_paragraph_buffer() -> None:
@@ -124,6 +325,7 @@ def parse_markdown_to_docx(md_file: str, docx_file: str) -> None:
         add_formatted_text(p, ' '.join(paragraph_buffer))
         paragraph_buffer = []
 
+    i = 0
     while i < len(lines):
         line = lines[i]
 
@@ -158,7 +360,6 @@ def parse_markdown_to_docx(md_file: str, docx_file: str) -> None:
                 if quote_line:
                     quote_paragraph_lines.append(quote_line)
                 else:
-                    # Une ligne `>` vide force un nouveau paragraphe dans la citation.
                     flush_quote_paragraph()
                 i += 1
             i -= 1
@@ -178,7 +379,6 @@ def parse_markdown_to_docx(md_file: str, docx_file: str) -> None:
             p.paragraph_format.left_indent = Cm(LIST_BASE_INDENT_CM + indent_level * 2.0)
             add_formatted_text(p, text)
         elif not line.strip():
-            # En Markdown, une ligne vide sépare des paragraphes.
             flush_paragraph_buffer()
         else:
             paragraph_buffer.append(line.strip())
@@ -226,5 +426,4 @@ def main() -> int:
 
 if __name__ == '__main__':
     raise SystemExit(main())
-
 
